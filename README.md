@@ -36,7 +36,7 @@ For example, if your friend is called `ElProGamer`, put their texture as `ElProG
 
 For emission textures, add `_emission` to the name: `ElProGamer_emission.png`.
 
-For charms, add `YourFriendsNames.` to the name: `YourFriendsNames.hatbundle`.
+For charms, add `ElProGamer.` to the name: `ElProGamer.hatbundle`.
 
 ---
 
