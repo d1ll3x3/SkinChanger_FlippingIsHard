@@ -40,7 +40,7 @@ For charms, add `ElProGamer.` to the name: `ElProGamer.hatbundle`.
 
 ## Charm & Skin Templates
 
-https://github.com/d1ll3x3/SkinChanger_FlippingIsHard/tree/master/Tuto_Templates
+https://github.com/d1ll3x3/SkinChanger_FlippingIsHard/releases/download/v1.1.0/Tuto_Templates.zip
 
 ---
 
