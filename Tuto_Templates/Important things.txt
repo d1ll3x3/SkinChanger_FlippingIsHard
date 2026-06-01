@@ -1,0 +1,18 @@
+Assets
+----------------------------------------------------------------
+Flippy 		-> model: SM_Player_v5_SP.fbx 		textures (old): image_0.png & _E.png
+Chain		-> model: charm_chain.glb 		textures: charm.png
+Donut 		-> model: Donut_02.glb
+Blender 	-> project: Charm_template.blend
+Unity 		-> Magica Cloth presets for charm (charm2 is the best) can be anywhere in the project. Bundle script: BuildBundle.cs (Put inside: Project\Assets\Editor)
+Donut Charm 	-> model: Donut_Charm.fbx 		textures: donut_charm.png
+----------------------------------------------------------------
+
+Unity charm physics	-> Magica Cloth 2 (if the mesh does not load: Right click on Project -> Create -> MonoBehaviourScript -> Delete the script)
+Unity charm physics	-> Magica Cloth 2 Script. Right click on Project -> Create -> MagicaCloth2 -> PreBuildScriptableObject
+Unity bundle export	-> hatbundle (BuildBundle.cs)
+Unity charm mesh	-> Make sure the mesh is correct (if not, it is not well exported in Blender)
+
+
+Blender 		-> Object mode -> Ctrl + J to join 2 models.   Object mode -> Select object → A (all) → Ctrl+A → All Transforms.   Edit Mode -> A -> M -> By Distance (value 0.001m)
+Blender export 		-> glTF 2.0 -> mesh (right side) -> Apply modifiers
