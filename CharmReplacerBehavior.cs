@@ -24,6 +24,14 @@ namespace CharmReplacer
         private const int FastPollBudgetFrames = 180;
         private const int StableEmptyFramesToStop = 5;
 
+        // MagicaCloth2 delayed re-enable (disable → wait N frames → re-enable)
+        private MonoBehaviour _pendingClothReenable = null;
+        private int _reenableFrameDelay = 0;
+
+        // Renderer re-enable after BuildAndRun (hide during async rebuild)
+        private Renderer _pendingRendererReenable = null;
+        private int _rendererReenableDelay = 0;
+
         public void Awake()
         {
             Instance = this;
@@ -45,7 +53,35 @@ namespace CharmReplacer
             {
                 CharmSystem.UpdateBundleLoading();
 
-                if (CharmState.CustomMesh == null && CharmState.PlayerCharmMeshes.Count == 0
+                // MagicaCloth2 delayed re-enable
+                if (_pendingClothReenable != null)
+                {
+                    if (_reenableFrameDelay > 0)
+                    {
+                        _reenableFrameDelay--;
+                    }
+                    else
+                    {
+                        Plugin.Log.LogInfo($"[CharmPhysics] Re-enabling cloth on '{_pendingClothReenable.gameObject.name}'");
+                        _pendingClothReenable.enabled = true;
+                        _pendingClothReenable = null;
+                    }
+                }
+
+                if (_pendingRendererReenable != null)
+                {
+                    if (_rendererReenableDelay > 0)
+                        _rendererReenableDelay--;
+                    else
+                    {
+                        _pendingRendererReenable.enabled = true;
+                        Plugin.Log.LogDebug($"[CharmPhysics] Renderer re-enabled on '{_pendingRendererReenable.gameObject.name}'");
+                        _pendingRendererReenable = null;
+                    }
+                }
+
+                if (CharmState.CustomMesh == null && CharmState.CustomPrefab == null
+                    && CharmState.PlayerCharmMeshes.Count == 0 && CharmState.PlayerCharmPrefabs.Count == 0
                     && CharmState.CustomSkinTexture == null && CharmState.PlayerBaseTextures.Count == 0) return;
 
                 if (_menuFastPollFrames > 0)
@@ -126,7 +162,8 @@ namespace CharmReplacer
 
         public void DoScanAndReplace()
         {
-            if (CharmState.CustomMesh == null && CharmState.PlayerCharmMeshes.Count == 0
+            if (CharmState.CustomMesh == null && CharmState.CustomPrefab == null
+                && CharmState.PlayerCharmMeshes.Count == 0 && CharmState.PlayerCharmPrefabs.Count == 0
                 && CharmState.CustomSkinTexture == null && CharmState.PlayerBaseTextures.Count == 0) return;
 
             try
@@ -153,7 +190,8 @@ namespace CharmReplacer
                     }
                 }
 
-                if (CharmState.CustomMesh != null || CharmState.PlayerCharmMeshes.Count > 0)
+                if (CharmState.CustomMesh != null || CharmState.CustomPrefab != null
+                    || CharmState.PlayerCharmMeshes.Count > 0 || CharmState.PlayerCharmPrefabs.Count > 0)
                 {
                     CharmSystem.TryApplyCharmToMeshFilters();
                 }
@@ -230,6 +268,20 @@ namespace CharmReplacer
         {
             DoScanAndReplace();
             ScheduleFastScans();
+        }
+
+        // MagicaCloth2 disables immediately, re-enables after N frames so the
+        // physics engine has time to process the mesh swap before rebinding.
+        public void ScheduleClothReenable(MonoBehaviour cloth)
+        {
+            _pendingClothReenable = cloth;
+            _reenableFrameDelay = 3;
+        }
+
+        public void ScheduleRendererReenable(Renderer renderer, int frames = 10)
+        {
+            _pendingRendererReenable = renderer;
+            _rendererReenableDelay = frames;
         }
     }
 }

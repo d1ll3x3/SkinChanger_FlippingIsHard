@@ -18,28 +18,17 @@ namespace CharmReplacer
 
         // --- Public API ---
 
-        /// <summary>
-        /// Start loading: local hatbundle first, then scan Charms/ folder for friend bundles.
-        /// </summary>
         public static void LoadCharmMesh()
         {
             try
             {
-                // 1) Local bundle
                 string localPath = Path.Combine(Plugin.PluginDirectory, "hatbundle");
                 if (File.Exists(localPath))
-                {
                     _charmBundleQueue.Enqueue(localPath);
-                }
                 else
-                {
                     Plugin.Log.LogWarning($"[Charm] hatbundle not found at: {localPath}");
-                }
 
-                // 2) Scan Charms/ folder for multiplayer bundles
                 ScanMultiplayerCharms();
-
-                // 3) Start processing queue
                 StartNextBundle();
             }
             catch (Exception ex)
@@ -48,9 +37,6 @@ namespace CharmReplacer
             }
         }
 
-        /// <summary>
-        /// Called each frame from CharmReplacerBehavior.Update(). Processes async bundle queue.
-        /// </summary>
         public static void UpdateBundleLoading()
         {
             if (!_isLoadingBundle) return;
@@ -98,11 +84,9 @@ namespace CharmReplacer
                     _extractionRequest = null;
                     _isLoadingBundle = false;
 
-                    // If bundle loaded after scene was ready, trigger immediate scan
                     if (stored)
                         CharmReplacerBehavior.Instance?.TriggerImmediateReplacement();
 
-                    // Process next bundle in queue
                     StartNextBundle();
                 }
             }
@@ -114,13 +98,12 @@ namespace CharmReplacer
             }
         }
 
-        /// <summary>
-        /// Apply charm meshes to ALL players (local + remote), matching nickname to loaded bundles.
-        /// </summary>
         public static void TryApplyCharmToMeshFilters()
         {
-            // === LOCAL PLAYER (original proven logic, untouched) ===
-            if (CharmState.CustomMesh != null)
+            bool useLocalPrefab = CharmState.CustomPrefab != null && PrefabHasMagicaCloth(CharmState.CustomPrefab);
+
+            // === LOCAL PLAYER: full prefab when it carries its own MC2, mesh-swap fallback otherwise ===
+            if (useLocalPrefab || (CharmState.CustomMesh == null && CharmState.CustomPrefab != null))
             {
                 try
                 {
@@ -137,6 +120,43 @@ namespace CharmReplacer
                         {
                             var mf = filters[i];
                             if (mf == null || mf.sharedMesh == null) continue;
+                            if (!IsCharmTarget(mf.gameObject)) continue;
+                            if (!mf.gameObject.activeSelf) continue;
+
+                            ReplaceCharmWithPrefab(mf, CharmState.CustomPrefab);
+                            return;
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.Log.LogWarning($"[Charm] Error in prefab MF[{i}]: {ex.Message}");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning($"[Charm] Local prefab replacement error: {ex.Message}");
+                }
+            }
+            else if (CharmState.CustomMesh != null)
+            {
+                try
+                {
+                    var playerGO = PlayerIdentity.GetLocalPlayerGO();
+                    Il2CppArrayBase<MeshFilter> filters;
+                    if (playerGO != null)
+                        filters = playerGO.GetComponentsInChildren<MeshFilter>(true);
+                    else
+                        filters = UnityEngine.Object.FindObjectsOfType<MeshFilter>();
+
+                    for (int i = 0; i < filters.Count; i++)
+                    {
+                        try
+                        {
+                            var mf = filters[i];
+                            if (mf == null || mf.sharedMesh == null) continue;
+
+                            int instanceId = mf.GetInstanceID();
+                            if (CharmState.CharmedMeshFilterIds.Contains(instanceId)) continue;
 
                             string meshName = "";
                             try { meshName = mf.sharedMesh.name ?? ""; } catch { }
@@ -163,6 +183,7 @@ namespace CharmReplacer
                                     if (cloned != null)
                                     {
                                         cloned.hideFlags = HideFlags.DontUnloadUnusedAsset;
+                                        PrepareRuntimeMaterial(cloned);
                                         newMats[m] = cloned;
                                     }
                                     else if (mr.sharedMaterials != null && m < mr.sharedMaterials.Length)
@@ -183,6 +204,7 @@ namespace CharmReplacer
 
                             mf.sharedMesh = CharmState.CustomMesh;
                             Plugin.Log.LogInfo($"[Charm] Mesh replaced on '{mf.gameObject.name}'");
+                            CharmState.CharmedMeshFilterIds.Add(instanceId);
                             CharmState.LocalCharmApplied = true;
 
                             ResetMagicaCloth(mf);
@@ -199,8 +221,8 @@ namespace CharmReplacer
                 }
             }
 
-            // === REMOTE PLAYERS (multiplayer, dictionary lookup) ===
-            if (CharmState.PlayerCharmMeshes.Count > 0)
+            // === REMOTE PLAYERS ===
+            if (CharmState.PlayerCharmPrefabs.Count > 0 || CharmState.PlayerCharmMeshes.Count > 0)
             {
                 try
                 {
@@ -213,10 +235,22 @@ namespace CharmReplacer
 
                         string nick = PlayerIdentity.GetPlayerNickname(playerGO);
                         if (string.IsNullOrEmpty(nick)) continue;
-                        if (!CharmState.PlayerCharmMeshes.TryGetValue(nick, out var targetMesh)) continue;
-                        CharmState.PlayerCharmMaterials.TryGetValue(nick, out var targetMaterials);
 
-                        ApplyCharmToPlayer(playerGO, targetMesh, targetMaterials);
+                        if (CharmState.PlayerCharmPrefabs.TryGetValue(nick, out var prefab) && PrefabHasMagicaCloth(prefab))
+                        {
+                            ApplyCharmPrefabToPlayer(playerGO, prefab);
+                            continue;
+                        }
+
+                        if (CharmState.PlayerCharmMeshes.TryGetValue(nick, out var targetMesh))
+                        {
+                            CharmState.PlayerCharmMaterials.TryGetValue(nick, out var targetMaterials);
+                            ApplyCharmToPlayer(playerGO, targetMesh, targetMaterials);
+                            continue;
+                        }
+
+                        if (CharmState.PlayerCharmPrefabs.TryGetValue(nick, out prefab))
+                            ApplyCharmPrefabToPlayer(playerGO, prefab);
                     }
                 }
                 catch (Exception ex)
@@ -228,9 +262,6 @@ namespace CharmReplacer
 
         // --- Internal ---
 
-        /// <summary>
-        /// Scan Charms/ folder and enqueue all .hatbundle files (name = player nickname).
-        /// </summary>
         private static void ScanMultiplayerCharms()
         {
             string charmsDir = Path.Combine(Plugin.PluginDirectory, "Charms");
@@ -239,8 +270,6 @@ namespace CharmReplacer
             foreach (var file in Directory.GetFiles(charmsDir, "*", SearchOption.TopDirectoryOnly))
             {
                 string fileName = Path.GetFileName(file);
-                // Accept any file that could be a bundle (no extension restriction — same as local "hatbundle")
-                // But skip anything that looks like an emission or skin texture
                 string lower = fileName.ToLowerInvariant();
                 if (lower.EndsWith(".png") || lower.EndsWith(".txt") || lower.EndsWith(".meta"))
                     continue;
@@ -253,9 +282,6 @@ namespace CharmReplacer
             }
         }
 
-        /// <summary>
-        /// Start loading the next bundle from the queue. Sets _currentCharmPlayer.
-        /// </summary>
         private static void StartNextBundle()
         {
             if (_charmBundleQueue.Count == 0)
@@ -267,17 +293,16 @@ namespace CharmReplacer
             string path = _charmBundleQueue.Dequeue();
             string fileName = Path.GetFileNameWithoutExtension(path);
 
-            // Determine if this is the local bundle or a friend's
             string localName = Path.GetFileNameWithoutExtension(
                 Path.Combine(Plugin.PluginDirectory, "hatbundle"));
             if (string.Equals(fileName, localName, StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(Path.GetDirectoryName(path), Plugin.PluginDirectory, StringComparison.OrdinalIgnoreCase))
             {
-                _currentCharmPlayer = null; // local
+                _currentCharmPlayer = null;
             }
             else
             {
-                _currentCharmPlayer = fileName; // friend's nickname
+                _currentCharmPlayer = fileName;
             }
 
             string label = _currentCharmPlayer ?? "local";
@@ -289,9 +314,6 @@ namespace CharmReplacer
             _isLoadingBundle = true;
         }
 
-        /// <summary>
-        /// Extract mesh and materials from bundle assets and store in the correct state slot.
-        /// </summary>
         private static bool ExtractAndStoreAssets(Il2CppReferenceArray<UnityEngine.Object> allAssets, string playerName)
         {
             if (allAssets == null) return false;
@@ -304,7 +326,6 @@ namespace CharmReplacer
             {
                 if (obj == null) continue;
 
-                // Try direct Mesh
                 var meshObj = obj.TryCast<Mesh>();
                 if (meshObj != null && extractedMesh == null)
                 {
@@ -315,68 +336,86 @@ namespace CharmReplacer
                     continue;
                 }
 
-                // Try GameObject with MeshFilter
                 var go = obj.TryCast<GameObject>();
-                if (go != null && extractedMesh == null)
+                if (go != null)
                 {
-                    var mf = go.GetComponent<MeshFilter>() ?? go.GetComponentInChildren<MeshFilter>();
-                    if (mf?.sharedMesh != null)
-                    {
-                        extractedMesh = UnityEngine.Object.Instantiate(mf.sharedMesh);
-                        extractedMesh.name = $"CustomGorraMesh_{label}";
-                        extractedMesh.hideFlags = HideFlags.DontUnloadUnusedAsset;
-                        Plugin.Log.LogDebug($"[CharmBundle] ✓ Mesh from GO for '{label}': '{extractedMesh.name}'");
+                    bool sourceWasActive = go.activeSelf;
+                    try { go.SetActive(false); } catch { }
 
-                        var mr = go.GetComponent<MeshRenderer>() ?? go.GetComponentInChildren<MeshRenderer>();
-                        if (mr != null && mr.sharedMaterials != null && mr.sharedMaterials.Length > 0)
+                    var prefab = UnityEngine.Object.Instantiate(go);
+                    try { go.SetActive(sourceWasActive); } catch { }
+
+                    prefab.name = $"CustomCharm_{label}";
+                    prefab.hideFlags = HideFlags.DontUnloadUnusedAsset;
+                    prefab.SetActive(false);
+                    UnityEngine.Object.DontDestroyOnLoad(prefab);
+
+                    if (playerName == null)
+                        CharmState.CustomPrefab = prefab;
+                    else
+                        CharmState.PlayerCharmPrefabs[playerName] = prefab;
+
+                    Plugin.Log.LogInfo($"[CharmBundle] ✓ Prefab stored for '{label}': '{prefab.name}' ({prefab.GetInstanceID()}) children={prefab.transform.childCount}");
+                    LogPrefabPhysicsSource(prefab, label);
+
+                    if (extractedMesh == null)
+                    {
+                        var mf = go.GetComponent<MeshFilter>() ?? go.GetComponentInChildren<MeshFilter>();
+                        if (mf?.sharedMesh != null)
                         {
-                            var newMats = new Il2CppReferenceArray<Material>(mr.sharedMaterials.Length);
-                            for (int i = 0; i < mr.sharedMaterials.Length; i++)
+                            extractedMesh = UnityEngine.Object.Instantiate(mf.sharedMesh);
+                            extractedMesh.name = $"CustomGorraMesh_{label}";
+                            extractedMesh.hideFlags = HideFlags.DontUnloadUnusedAsset;
+                            Plugin.Log.LogDebug($"[CharmBundle] ✓ Mesh from GO for '{label}': '{extractedMesh.name}'");
+
+                            var mr = go.GetComponent<MeshRenderer>() ?? go.GetComponentInChildren<MeshRenderer>();
+                            if (mr != null && mr.sharedMaterials != null && mr.sharedMaterials.Length > 0)
                             {
-                                var cloned = UnityEngine.Object.Instantiate(mr.sharedMaterials[i]);
-                                cloned.hideFlags = HideFlags.DontUnloadUnusedAsset;
-                                newMats[i] = cloned;
+                                var newMats = new Il2CppReferenceArray<Material>(mr.sharedMaterials.Length);
+                                for (int i = 0; i < mr.sharedMaterials.Length; i++)
+                                {
+                                    var cloned = UnityEngine.Object.Instantiate(mr.sharedMaterials[i]);
+                                    cloned.hideFlags = HideFlags.DontUnloadUnusedAsset;
+                                    PrepareRuntimeMaterial(cloned);
+                                    newMats[i] = cloned;
+                                }
+                                extractedMaterials = newMats;
+                                Plugin.Log.LogDebug($"[CharmBundle] ✓ Materials from GO for '{label}' ({extractedMaterials.Length})");
                             }
-                            extractedMaterials = newMats;
-                            Plugin.Log.LogDebug($"[CharmBundle] ✓ Materials from GO for '{label}' ({extractedMaterials.Length})");
                         }
                     }
                 }
 
-                // Try direct Material
                 if (extractedMaterials == null)
                 {
                     var matObj = obj.TryCast<Material>();
                     if (matObj != null)
                     {
                         var clonedMat = UnityEngine.Object.Instantiate(matObj);
-                        if (clonedMat != null)
-                        {
-                            clonedMat.hideFlags = HideFlags.DontUnloadUnusedAsset;
-                            extractedMaterials = new Il2CppReferenceArray<Material>(new Material[] { clonedMat });
-                            Plugin.Log.LogDebug($"[CharmBundle] ✓ Material for '{label}': '{matObj.name}'");
-                        }
+                            if (clonedMat != null)
+                            {
+                                clonedMat.hideFlags = HideFlags.DontUnloadUnusedAsset;
+                                PrepareRuntimeMaterial(clonedMat);
+                                extractedMaterials = new Il2CppReferenceArray<Material>(new Material[] { clonedMat });
+                                Plugin.Log.LogDebug($"[CharmBundle] ✓ Material for '{label}': '{matObj.name}'");
+                            }
                     }
                 }
             }
 
-            // Store in correct slot
             if (playerName == null)
             {
-                // Local player
                 if (extractedMesh != null) CharmState.CustomMesh = extractedMesh;
                 if (extractedMaterials != null) CharmState.BundleMaterials = extractedMaterials;
             }
             else
             {
-                // Friend
                 if (extractedMesh != null)
                     CharmState.PlayerCharmMeshes[playerName] = extractedMesh;
                 if (extractedMaterials != null)
                     CharmState.PlayerCharmMaterials[playerName] = extractedMaterials;
             }
 
-            // Consolidated Info log
             if (extractedMesh != null || extractedMaterials != null)
             {
                 string meshInfo = extractedMesh != null ? $"mesh: {extractedMesh.name}" : "no mesh";
@@ -419,7 +458,7 @@ namespace CharmReplacer
             return false;
         }
 
-        // --- Apply charm to a single player ---
+        // --- Apply charm to a single remote player (mesh-swap path) ---
 
         private static void ApplyCharmToPlayer(GameObject playerGO, Mesh targetMesh, Il2CppReferenceArray<Material> targetMaterials)
         {
@@ -433,7 +472,6 @@ namespace CharmReplacer
                     var mf = filters[i];
                     if (mf == null || mf.sharedMesh == null) continue;
 
-                    // Skip already-replaced filters
                     int instanceId = mf.GetInstanceID();
                     if (CharmState.CharmedMeshFilterIds.Contains(instanceId)) continue;
                     if (mf.sharedMesh == targetMesh) continue;
@@ -446,7 +484,6 @@ namespace CharmReplacer
 
                     var mr = mf.GetComponent<MeshRenderer>();
 
-                    // Apply materials
                     if (targetMaterials != null && mr != null && targetMaterials.Length > 0)
                     {
                         var newMats = new Il2CppReferenceArray<Material>(targetMaterials.Length);
@@ -464,6 +501,7 @@ namespace CharmReplacer
                             if (cloned != null)
                             {
                                 cloned.hideFlags = HideFlags.DontUnloadUnusedAsset;
+                                PrepareRuntimeMaterial(cloned);
                                 newMats[m] = cloned;
                             }
                             else if (mr.sharedMaterials != null && m < mr.sharedMaterials.Length)
@@ -475,7 +513,6 @@ namespace CharmReplacer
                     }
                     else
                     {
-                        // Use captured game materials (fallback)
                         if (CharmState.CapturedGameMaterials == null && mr != null
                             && mr.sharedMaterials != null && mr.sharedMaterials.Length > 0)
                         {
@@ -487,12 +524,10 @@ namespace CharmReplacer
                         }
                     }
 
-                    // Apply mesh
                     mf.sharedMesh = targetMesh;
                     CharmState.CharmedMeshFilterIds.Add(instanceId);
                     Plugin.Log.LogInfo($"[Charm] ✓ Mesh replaced on '{mf.gameObject.name}'");
 
-                    // Reset MagicaCloth physics
                     ResetMagicaCloth(mf);
                 }
                 catch (Exception ex)
@@ -502,39 +537,333 @@ namespace CharmReplacer
             }
         }
 
+        // --- Prefab-based charm replacement ---
+
+        /// <summary>
+        /// Reemplaza el SM_Charm_Phone original con el prefab del bundle.
+        /// Solo se usa como fallback para prefabs compuestos. Para bundles simples
+        /// con MeshFilter/MeshRenderer, el camino preferido es sustituir mesh/material.
+        /// </summary>
+        private static void ReplaceCharmWithPrefab(MeshFilter originalMF, GameObject prefab)
+        {
+            if (prefab == null) return;
+
+            int originalId = originalMF.GetInstanceID();
+            if (CharmState.CharmedMeshFilterIds.Contains(originalId)) return;
+
+            var originalGO = originalMF.gameObject;
+            var parent     = originalGO.transform.parent;
+            var newCharm = UnityEngine.Object.Instantiate(prefab);
+            newCharm.transform.SetParent(parent, false);
+            newCharm.transform.localPosition = originalGO.transform.localPosition;
+            
+            // Apply original rotation, but add an offset of -90 on the X axis to point it towards the sky
+            newCharm.transform.localRotation = originalGO.transform.localRotation * UnityEngine.Quaternion.Euler(-90f, 0f, 0f);
+            
+            // Preserve the user's prefab localScale, do not overwrite it with the original's.
+
+            SetLayerRecursively(newCharm, originalGO.layer);
+
+            var cloths = newCharm.GetComponentsInChildren<MagicaCloth2.MagicaCloth>(true);
+            if (cloths == null || cloths.Count == 0)
+                Plugin.Log.LogWarning("[CharmPhysics] Prefab replacement has no MagicaCloth; leaving physics untouched.");
+            else
+                Plugin.Log.LogInfo($"[CharmPhysics] Prefab replacement using {cloths.Count} bundled MagicaCloth component(s).");
+
+            // Solo upgrade Built-in→URP. NO copiar el shader del originalGO (es SG_Player_MSAO,
+            // shader del cuerpo del jugador, y rompe los materiales del charm).
+            FixMaterialShaders(newCharm);
+
+            newCharm.SetActive(true);
+
+            // Diagnóstico post-activación — útil si algo se ve raro
+            try
+            {
+                Plugin.Log.LogInfo($"[Charm] active={newCharm.activeInHierarchy} lossyScale={newCharm.transform.lossyScale} children={newCharm.transform.childCount}");
+                var anyR = newCharm.GetComponentInChildren<Renderer>();
+                if (anyR != null)
+                    Plugin.Log.LogInfo($"[Charm] bounds center={anyR.bounds.center} size={anyR.bounds.size}");
+                else
+                    Plugin.Log.LogWarning("[Charm] No Renderer encontrado en el prefab instanciado");
+            }
+            catch { }
+
+            ForceRenderersEnabled(newCharm);
+
+            RebuildBundledMagicaCloth(newCharm);
+
+            originalGO.SetActive(false);
+            CharmState.CharmedMeshFilterIds.Add(originalId);
+            CharmState.LocalCharmApplied = true;
+
+            Plugin.Log.LogInfo($"[Charm] ✓ Prefab replacing '{originalGO.name}' (layer={originalGO.layer})");
+        }
+
+        private static bool PrefabHasMagicaCloth(GameObject prefab)
+        {
+            if (prefab == null) return false;
+
+            try
+            {
+                var cloth = prefab.GetComponent<MagicaCloth2.MagicaCloth>()
+                    ?? prefab.GetComponentInChildren<MagicaCloth2.MagicaCloth>(true);
+                return cloth != null;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void RebuildBundledMagicaCloth(GameObject charm)
+        {
+            if (charm == null) return;
+
+            try
+            {
+                var cloths = charm.GetComponentsInChildren<MagicaCloth2.MagicaCloth>(true);
+                if (cloths == null || cloths.Count == 0) return;
+
+                // Do NOT call BuildAndRun() here. The user configured the cloth in the Unity Editor,
+                // which generates pre-build data. Calling BuildAndRun() at runtime discards it and
+                // attempts to rebuild from meshes, which fails if meshes aren't Read/Write enabled.
+                // We just ensure the components are enabled so their native Start() runs.
+                for (int i = 0; i < cloths.Count; i++)
+                {
+                    var cloth = cloths[i];
+                    if (cloth != null && !cloth.enabled)
+                    {
+                        cloth.enabled = true;
+                        Plugin.Log.LogInfo($"[CharmPhysics] Enabled pre-built MagicaCloth on '{cloth.gameObject.name}'");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[CharmPhysics] MagicaCloth enable error: {ex.Message}");
+            }
+        }
+
+        private static void LogPrefabPhysicsSource(GameObject prefab, string label)
+        {
+            try
+            {
+                var renderers = prefab.GetComponentsInChildren<Renderer>(true);
+                var meshFilters = prefab.GetComponentsInChildren<MeshFilter>(true);
+                var cloths = prefab.GetComponentsInChildren<MagicaCloth2.MagicaCloth>(true);
+
+                Plugin.Log.LogInfo($"[CharmBundle] Prefab '{label}' contents: children={prefab.transform.childCount}, renderers={renderers?.Count ?? 0}, meshFilters={meshFilters?.Count ?? 0}, magicaCloth={cloths?.Count ?? 0}");
+
+                for (int i = 0; i < prefab.transform.childCount; i++)
+                {
+                    var child = prefab.transform.GetChild(i);
+                    Plugin.Log.LogInfo($"[CharmBundle]   child[{i}]='{child.name}' children={child.childCount}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[CharmBundle] Prefab diagnostics failed for '{label}': {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Solo upgrade de shaders Built-in (Standard, Legacy/...) → URP/Lit.
+        /// Los shaders URP/SRP del bundle se respetan tal cual.
+        /// Detecta shaders rotos (Hidden/InternalErrorShader) por si algún shader no está en el juego.
+        /// </summary>
+        private static void FixMaterialShaders(GameObject newCharm)
+        {
+            try
+            {
+                var newMRs = newCharm.GetComponentsInChildren<MeshRenderer>(true);
+                foreach (var mr in newMRs)
+                {
+                    if (mr == null) continue;
+                    foreach (var mat in mr.sharedMaterials)
+                    {
+                        if (mat == null) continue;
+                        string shaderName = mat.shader?.name ?? "";
+
+                        if (mat.shader == null || shaderName == "Hidden/InternalErrorShader")
+                        {
+                            Plugin.Log.LogError($"[CharmShader] Mat '{mat.name}' tiene shader ROTO ('{shaderName}'). El shader original del bundle no existe en el juego. Reexporta usando un shader que el juego tenga cargado (ej. URP/Lit).");
+                            var fallback = Shader.Find("Universal Render Pipeline/Lit");
+                            if (fallback != null) mat.shader = fallback;
+                            continue;
+                        }
+
+                        bool isBuiltIn = shaderName == "Standard"
+                                      || shaderName == "Standard (Specular setup)"
+                                      || shaderName == "Diffuse"
+                                      || shaderName == "Bumped Diffuse"
+                                      || shaderName.StartsWith("Legacy Shaders/");
+
+                        if (isBuiltIn)
+                        {
+                            var urpLit = Shader.Find("Universal Render Pipeline/Lit");
+                            if (urpLit != null)
+                            {
+                                Plugin.Log.LogInfo($"[CharmShader] Built-in→URP: '{shaderName}' → 'Universal Render Pipeline/Lit'");
+                                mat.shader = urpLit;
+                            }
+                            else
+                            {
+                                Plugin.Log.LogWarning("[CharmShader] URP/Lit no encontrado en este juego");
+                            }
+                        }
+                        else
+                        {
+                            Plugin.Log.LogInfo($"[CharmShader] '{shaderName}' ya es SRP/custom — sin cambios");
+                        }
+
+                        PrepareRuntimeMaterial(mat);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[CharmShader] Error: {ex.Message}");
+            }
+        }
+
+        private static void PrepareRuntimeMaterial(Material mat)
+        {
+            if (mat == null) return;
+
+            try
+            {
+                if (mat.HasProperty("_BaseColor"))
+                {
+                    var color = mat.GetColor("_BaseColor");
+                    if (color.a < 0.99f)
+                    {
+                        color.a = 1f;
+                        mat.SetColor("_BaseColor", color);
+                    }
+                }
+
+                if (mat.HasProperty("_Color"))
+                {
+                    var color = mat.GetColor("_Color");
+                    if (color.a < 0.99f)
+                    {
+                        color.a = 1f;
+                        mat.SetColor("_Color", color);
+                    }
+                }
+
+                if (mat.HasProperty("_Surface")) mat.SetFloat("_Surface", 0f);
+                if (mat.HasProperty("_AlphaClip")) mat.SetFloat("_AlphaClip", 0f);
+
+                mat.DisableKeyword("_SURFACE_TYPE_TRANSPARENT");
+                mat.DisableKeyword("_ALPHATEST_ON");
+                mat.renderQueue = -1;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[CharmMaterial] Runtime material prep failed for '{mat.name}': {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Garantiza enabled=true en todos los Renderer del GO.
+        /// Protección ante MC2 ocultando renderers como efecto secundario de un build fallido.
+        /// </summary>
+        private static void ForceRenderersEnabled(GameObject go)
+        {
+            try
+            {
+                var renderers = go.GetComponentsInChildren<Renderer>(true);
+                foreach (var r in renderers)
+                {
+                    if (r == null) continue;
+                    if (!r.enabled)
+                    {
+                        r.enabled = true;
+                        Plugin.Log.LogInfo($"[CharmRenderer] Re-enabled renderer en '{r.gameObject.name}'");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[CharmRenderer] Error: {ex.Message}");
+            }
+        }
+
+        private static void SetLayerRecursively(GameObject go, int layer)
+        {
+            if (go == null) return;
+            go.layer = layer;
+            for (int i = 0; i < go.transform.childCount; i++)
+                SetLayerRecursively(go.transform.GetChild(i).gameObject, layer);
+        }
+
+        private static void ApplyCharmPrefabToPlayer(GameObject playerGO, GameObject prefab)
+        {
+            var filters = playerGO.GetComponentsInChildren<MeshFilter>(true);
+            if (filters == null) return;
+
+            for (int i = 0; i < filters.Count; i++)
+            {
+                try
+                {
+                    var mf = filters[i];
+                    if (mf == null || mf.sharedMesh == null) continue;
+                    if (!IsCharmTarget(mf.gameObject)) continue;
+
+                    ReplaceCharmWithPrefab(mf, prefab);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning($"[Charm] Error in prefab MF[{i}]: {ex.Message}");
+                }
+            }
+        }
+
         private static void ResetMagicaCloth(MeshFilter mf)
         {
             try
             {
-                var gameGO = mf.gameObject;
-                var parentGO = gameGO.transform.parent?.gameObject;
+                var root = mf.transform.root.gameObject;
+                var allMBs = root.GetComponentsInChildren<MonoBehaviour>(true);
 
-                var allMB = new System.Collections.Generic.List<MonoBehaviour>();
-                foreach (var mb in gameGO.GetComponents<MonoBehaviour>()) allMB.Add(mb);
-
-                if (parentGO != null)
-                {
-                    foreach (var pMB in parentGO.GetComponents<MonoBehaviour>()) allMB.Add(pMB);
-                }
-
-                foreach (var mb in allMB)
+                foreach (var mb in allMBs)
                 {
                     if (mb == null) continue;
                     string typeName = "";
-                    try { typeName = mb.GetIl2CppType()?.Name ?? ""; } catch { }
+                    try { typeName = mb.GetIl2CppType()?.FullName ?? ""; } catch { continue; }
 
-                    if (typeName.Contains("MagicaCloth"))
+                    if (!typeName.Contains("MagicaCloth2") && !typeName.Contains("MagicaCloth"))
+                        continue;
+
+                    Plugin.Log.LogInfo($"[CharmPhysics] Found {typeName} on '{mb.gameObject.name}'");
+
+                    bool rebuilt = false;
+                    try
                     {
-                        Plugin.Log.LogDebug($"[CharmPhysics] MagicaCloth found on '{mb.gameObject.name}'");
-                        var typeObj = mb.GetIl2CppType();
-                        var resetMethod = typeObj.GetMethod("ResetCloth");
-                        if (resetMethod != null)
-                        {
-                            var keepPoseBoxed = new Il2CppSystem.Boolean();
-                            resetMethod.Invoke(mb, new Il2CppSystem.Object[] { keepPoseBoxed.BoxIl2CppObject() });
-                        }
+                        var mc2 = mb.TryCast<MagicaCloth2.MagicaCloth>();
+                        if (mc2 != null) { mc2.BuildAndRun(); Plugin.Log.LogInfo("[CharmPhysics] ✓ BuildAndRun via TryCast"); rebuilt = true; }
                     }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[CharmPhysics] TryCast: {ex.Message}"); }
+
+                    if (!rebuilt)
+                    {
+                        try
+                        {
+                            var m = mb.GetIl2CppType().GetMethod("BuildAndRun",
+                                Il2CppSystem.Reflection.BindingFlags.Public | Il2CppSystem.Reflection.BindingFlags.Instance);
+                            if (m != null) { m.Invoke(mb, null); Plugin.Log.LogInfo("[CharmPhysics] ✓ BuildAndRun via reflection"); rebuilt = true; }
+                        }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[CharmPhysics] Reflection: {ex.Message}"); }
+                    }
+
+                    if (!rebuilt) { mb.enabled = false; CharmReplacerBehavior.Instance?.ScheduleClothReenable(mb); }
+
+                    return;
                 }
+
+                Plugin.Log.LogWarning($"[CharmPhysics] No MagicaCloth/MagicaCloth2 found in hierarchy of '{root.name}'.");
             }
             catch (Exception ex)
             {

@@ -10,11 +10,26 @@ ReleaseBuild/
 *.user
 *.suo
 
-# Release artifacts
-*.zip
-*.pdb
-*.dll
+# Decompile / reference dumps
+DecompileHelper/
+Plugin_functional_reference*.txt
+logs.txt
+*.log
 
-# OS junk
-Thumbs.db
-.DS_Store
+# Release artifacts (published on GitHub Releases)
+*.zip
+
+# Asset working files
+*.obj
+*.mtl
+
+# Dev scripts (one-shot patches / helpers)
+patch*.py
+split_patch.py
+fix_handler.py
+build.bat
+install-mod.ps1
+translate.ps1
+
+# Backup folders
+V2.5/

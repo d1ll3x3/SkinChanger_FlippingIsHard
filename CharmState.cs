@@ -26,6 +26,10 @@ internal static class CharmState
     public static Il2CppReferenceArray<Material> CapturedGameMaterials;
     public static Il2CppReferenceArray<Material> BundleMaterials;
 
+    // Prefab-based charm replacement (preferred when bundle includes MagicaCloth2)
+    public static GameObject CustomPrefab;
+    public static System.Collections.Generic.Dictionary<string, GameObject> PlayerCharmPrefabs = new System.Collections.Generic.Dictionary<string, GameObject>(System.StringComparer.OrdinalIgnoreCase);
+
     // Multiplayer charm meshes + materials (key = player nickname)
     public static System.Collections.Generic.Dictionary<string, Mesh> PlayerCharmMeshes = new System.Collections.Generic.Dictionary<string, Mesh>(System.StringComparer.OrdinalIgnoreCase);
     public static System.Collections.Generic.Dictionary<string, Il2CppReferenceArray<Material>> PlayerCharmMaterials = new System.Collections.Generic.Dictionary<string, Il2CppReferenceArray<Material>>(System.StringComparer.OrdinalIgnoreCase);

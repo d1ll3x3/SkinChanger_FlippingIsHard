@@ -53,6 +53,14 @@
       <HintPath>I:\SteamLibrary\steamapps\common\Flipping is Hard Demo\BepInEx\interop\UnityEngine.UnityWebRequestTextureModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="MagicaClothV2">
+      <HintPath>I:\SteamLibrary\steamapps\common\Flipping is Hard Demo\BepInEx\interop\MagicaClothV2.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.Mathematics">
+      <HintPath>I:\SteamLibrary\steamapps\common\Flipping is Hard Demo\BepInEx\interop\Unity.Mathematics.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
   
 </Project>
