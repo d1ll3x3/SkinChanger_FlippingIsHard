@@ -18,7 +18,7 @@
     ├── Microsoft.Win32.SystemEvents.dll
     ├── Skin.png (Your own skin)
     ├── Skin_Emission.png (Your own Emission map)
-    ├── hatbundle
+    ├── hatbundle (Your own charm)
     ├── Skins/
     │   └── YourFriendsNames.png
     │   └── YourFriendsNames_emission.png
@@ -37,6 +37,10 @@ For example, if your friend is called `ElProGamer`, put their texture as `ElProG
 For emission textures, add `_emission` to the name: `ElProGamer_emission.png`.
 
 For charms, add `ElProGamer.` to the name: `ElProGamer.hatbundle`.
+
+## Charm & Skin Templates
+
+https://github.com/d1ll3x3/SkinChanger_FlippingIsHard/tree/master/Tuto_Templates
 
 ---
 
