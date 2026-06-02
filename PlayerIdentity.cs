@@ -14,8 +14,20 @@ namespace CharmReplacer
         // logs only on first observation.
         private static readonly HashSet<string> _loggedNicknameResolutions = new HashSet<string>(StringComparer.Ordinal);
 
+        // --- Per-frame caches (cleared on scene change) ---
+        private static int _cachedFrame = -1;
+        private static List<GameObject> _cachedAllPlayers;
+        private static readonly Dictionary<int, string> _nicknameCache = new Dictionary<int, string>();
+
         public static string GetPlayerNickname(GameObject p)
         {
+            if (p == null) return string.Empty;
+
+            // Fast path: check cache by instance ID
+            int instanceId = p.GetInstanceID();
+            if (_nicknameCache.TryGetValue(instanceId, out var cachedNick))
+                return cachedNick;
+
             try
             {
                 var mbs = p.GetComponents<MonoBehaviour>();
@@ -70,6 +82,7 @@ namespace CharmReplacer
                                             string key = "p:" + name + "=" + str;
                                             if (_loggedNicknameResolutions.Add(key))
                                                 Plugin.Log.LogInfo($"[PlayerIdentity] + Nickname found via property '{name}': {str}");
+                                            _nicknameCache[instanceId] = str;
                                             return str;
                                         }
                                         Plugin.Log.LogDebug($"[PlayerIdentity]   property '{name}' ({propTypeName}) returned empty/null string");
@@ -97,6 +110,7 @@ namespace CharmReplacer
                                         string key = "f:" + name + "=" + str;
                                         if (_loggedNicknameResolutions.Add(key))
                                             Plugin.Log.LogInfo($"[PlayerIdentity] + Nickname found via field '{name}': {str}");
+                                        _nicknameCache[instanceId] = str;
                                         return str;
                                     }
                                     Plugin.Log.LogDebug($"[PlayerIdentity]   field '{name}' ({fieldTypeName}) returned empty/null string");
@@ -176,6 +190,11 @@ namespace CharmReplacer
 
         public static System.Collections.Generic.List<GameObject> GetAllPlayers()
         {
+            // Frame-cached: FindObjectsOfType is expensive; reuse result within the same frame
+            int currentFrame = Time.frameCount;
+            if (_cachedFrame == currentFrame && _cachedAllPlayers != null)
+                return _cachedAllPlayers;
+
             var list = new System.Collections.Generic.List<GameObject>();
             try
             {
@@ -190,7 +209,18 @@ namespace CharmReplacer
                 }
             }
             catch { }
+
+            _cachedFrame = currentFrame;
+            _cachedAllPlayers = list;
             return list;
+        }
+
+        /// <summary>Clear per-scene caches (call on scene change).</summary>
+        public static void ClearCaches()
+        {
+            _cachedFrame = -1;
+            _cachedAllPlayers = null;
+            _nicknameCache.Clear();
         }
 
         public static bool IsLocalPlayer(GameObject p)

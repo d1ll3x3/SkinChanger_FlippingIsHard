@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
@@ -52,55 +53,59 @@ namespace CharmReplacer
             }
             catch { }
 
-            ApplyDynamicEmissionProperties(mat, emissionTex);
+            ApplyCachedEmissionProps(mat, emissionTex);
         }
 
-        private static void ApplyDynamicEmissionProperties(Material mat, Texture emissionTex)
+        // Cache emission-related property indices per shader so we only scan once.
+        private static readonly Dictionary<int, int[]> _shaderEmissionPropCache = new Dictionary<int, int[]>();
+
+        private static void ApplyCachedEmissionProps(Material mat, Texture emissionTex)
         {
             if (mat == null || emissionTex == null) return;
-
             Shader shader = null;
             try { shader = mat.shader; } catch { }
             if (shader == null) return;
 
-            try
+            int shaderId = shader.GetInstanceID();
+            if (!_shaderEmissionPropCache.TryGetValue(shaderId, out var emissionIndices))
             {
-                int propertyCount = shader.GetPropertyCount();
-                if (propertyCount <= 0) return;
-
-                for (int i = 0; i < propertyCount; i++)
+                // First time seeing this shader: scan its properties once
+                var found = new List<int>();
+                try
                 {
-                    string propName;
-                    try { propName = shader.GetPropertyName(i); }
-                    catch { continue; }
-
-                    if (string.IsNullOrEmpty(propName)) continue;
-
-                    string propLower = propName.ToLowerInvariant();
-                    bool looksEmissive = propLower.Contains("emission") || propLower.Contains("emissive") || propLower.Contains("glow");
-                    if (!looksEmissive) continue;
-
-                    ShaderPropertyType propType;
-                    try { propType = shader.GetPropertyType(i); }
-                    catch { continue; }
-
-                    if (propType == ShaderPropertyType.Texture)
+                    int count = shader.GetPropertyCount();
+                    for (int i = 0; i < count; i++)
                     {
-                        mat.SetTexture(propName, emissionTex);
-                    }
-                    else if (propType == ShaderPropertyType.Color)
-                    {
-                        mat.SetColor(propName, Color.white);
-                    }
-                    else if (propType == ShaderPropertyType.Float || propType == ShaderPropertyType.Range)
-                    {
-                        mat.SetFloat(propName, 1.0f);
+                        string propName;
+                        try { propName = shader.GetPropertyName(i); }
+                        catch { continue; }
+                        if (string.IsNullOrEmpty(propName)) continue;
+
+                        string lower = propName.ToLowerInvariant();
+                        if (lower.Contains("emission") || lower.Contains("emissive") || lower.Contains("glow"))
+                            found.Add(i);
                     }
                 }
+                catch { }
+                emissionIndices = found.ToArray();
+                _shaderEmissionPropCache[shaderId] = emissionIndices;
             }
-            catch (Exception ex)
+
+            // Apply using cached indices
+            foreach (int i in emissionIndices)
             {
-                Plugin.Log.LogWarning($"[Skin] Error en ApplyDynamicEmissionProperties: {ex.Message}");
+                try
+                {
+                    string propName = shader.GetPropertyName(i);
+                    var propType = shader.GetPropertyType(i);
+                    if (propType == ShaderPropertyType.Texture)
+                        mat.SetTexture(propName, emissionTex);
+                    else if (propType == ShaderPropertyType.Color)
+                        mat.SetColor(propName, Color.white);
+                    else if (propType == ShaderPropertyType.Float || propType == ShaderPropertyType.Range)
+                        mat.SetFloat(propName, 1.0f);
+                }
+                catch { }
             }
         }
 

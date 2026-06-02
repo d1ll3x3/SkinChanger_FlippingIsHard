@@ -16,6 +16,9 @@ namespace CharmReplacer
         private static UnityEngine.AssetBundleRequest _extractionRequest;
         private static UnityEngine.AssetBundle _extractingBundle;
 
+        /// <summary>True while any bundle is in flight (download or extraction).</summary>
+        public static bool IsLoadingBundle => _isLoadingBundle;
+
         // --- Public API ---
 
         public static void LoadCharmMesh()

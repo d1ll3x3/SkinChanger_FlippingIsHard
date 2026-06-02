@@ -18,7 +18,7 @@ using DrawingColor = System.Drawing.Color;
 
 namespace CharmReplacer;
 
-[BepInPlugin("com.dani.charmreplacer", "CharmReplacer", "2.7.6")]
+[BepInPlugin("com.dani.charmreplacer", "CharmReplacer", "2.8.0")]
 public class Plugin : BasePlugin
 {
     internal static new ManualLogSource Log;

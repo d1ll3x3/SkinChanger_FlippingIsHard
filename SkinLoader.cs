@@ -1,11 +1,19 @@
 using System;
+using System.Drawing.Imaging;
 using System.IO;
+using System.Runtime.InteropServices;
 using UnityEngine;
 
 namespace CharmReplacer
 {
     internal static class SkinLoader
     {
+        /// <summary>
+        /// Load a PNG/JPG into a Unity Texture2D using LockBits for fast pixel access.
+        /// LockBits is 5-10x faster than GetPixel() because it reads the entire
+        /// bitmap buffer in one native call instead of crossing the managed boundary
+        /// for every single pixel.
+        /// </summary>
         public static Texture2D LoadTextureFromFile(string path, string texName)
         {
             if (!File.Exists(path)) return null;
@@ -16,16 +24,32 @@ namespace CharmReplacer
                 int w = bmp.Width;
                 int h = bmp.Height;
 
+                // Lock the bitmap's bits for direct memory access
+                var rect = new System.Drawing.Rectangle(0, 0, w, h);
+                var bmpData = bmp.LockBits(rect, ImageLockMode.ReadOnly,
+                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+
                 var pixels = new Color32[w * h];
+                int stride = bmpData.Stride;
+
+                // Copy rows. Bitmap is stored bottom-up; Unity expects top-down.
+                // ARGB in memory = [B, G, R, A] on little-endian, Color32 is [r, g, b, a].
+                byte[] row = new byte[stride];
                 for (int y = 0; y < h; y++)
                 {
-                    int srcY = h - 1 - y;
+                    int srcY = h - 1 - y; // flip vertically
+                    IntPtr srcRow = bmpData.Scan0 + srcY * stride;
+                    Marshal.Copy(srcRow, row, 0, stride);
+
+                    int destRowBase = y * w;
                     for (int x = 0; x < w; x++)
                     {
-                        var px = bmp.GetPixel(x, srcY);
-                        pixels[(y * w) + x] = new Color32(px.R, px.G, px.B, px.A);
+                        int i = x * 4;
+                        pixels[destRowBase + x] = new Color32(row[i + 2], row[i + 1], row[i + 0], row[i + 3]);
                     }
                 }
+
+                bmp.UnlockBits(bmpData);
 #pragma warning restore CA1416
 
                 var tex = new Texture2D(w, h, TextureFormat.RGBA32, false);

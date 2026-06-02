@@ -47,11 +47,25 @@ namespace CharmReplacer
             }
         }
 
+        public void OnDestroy()
+        {
+            try
+            {
+                UnityEngine.SceneManagement.SceneManager.sceneLoaded -= new Action<UnityEngine.SceneManagement.Scene, UnityEngine.SceneManagement.LoadSceneMode>(OnSceneLoaded);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogError($"[CharmReplacerBehavior] OnDestroy error: {ex}");
+            }
+        }
+
         public void Update()
         {
             try
             {
-                CharmSystem.UpdateBundleLoading();
+                // Only tick bundle loading state machine when a load is in flight
+                if (CharmSystem.IsLoadingBundle)
+                    CharmSystem.UpdateBundleLoading();
 
                 // MagicaCloth2 delayed re-enable
                 if (_pendingClothReenable != null)
@@ -204,8 +218,8 @@ namespace CharmReplacer
 
         public void ScheduleFastScans()
         {
-            _pendingScans = 15;
-            _scanInterval = 0.5f;
+            _pendingScans = 5;
+            _scanInterval = 1.0f;
             _nextScanDelay = 0f;
         }
 
@@ -230,6 +244,7 @@ namespace CharmReplacer
 
             if (isMainMenu || isGame)
             {
+                PlayerIdentity.ClearCaches();
                 CharmState.SkinnedRendererIds.Clear();
                 CharmState.MenuPreviewRendererIds.Clear();
                 CharmState.MenuPreviewRootIds.Clear();

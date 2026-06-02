@@ -21,44 +21,59 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="Tuto_Templates\**" />
+    <Compile Remove="*.py" />
+    <None Include="Tuto_Templates\**" />
+  </ItemGroup>
+
+  <!--
+    GamePath: set in CharmReplacer.csproj.user (gitignored).
+    Point it to the game's root folder, e.g.:
+    C:\Program Files (x86)\Steam\steamapps\common\Flipping is Hard Demo
+  -->
+  <PropertyGroup Condition="'$(GamePath)' == ''">
+    <GamePath>MISSING_GAME_PATH</GamePath>
+  </PropertyGroup>
+
+  <ItemGroup>
     <Reference Include="UnityEngine.CoreModule">
-      <HintPath>I:\SteamLibrary\steamapps\common\Flipping is Hard Demo\BepInEx\interop\UnityEngine.CoreModule.dll</HintPath>
+      <HintPath>$(GamePath)\BepInEx\interop\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.AssetBundleModule">
-      <HintPath>I:\SteamLibrary\steamapps\common\Flipping is Hard Demo\BepInEx\interop\UnityEngine.AssetBundleModule.dll</HintPath>
+      <HintPath>$(GamePath)\BepInEx\interop\UnityEngine.AssetBundleModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Il2Cppmscorlib">
-      <HintPath>I:\SteamLibrary\steamapps\common\Flipping is Hard Demo\BepInEx\interop\Il2Cppmscorlib.dll</HintPath>
+      <HintPath>$(GamePath)\BepInEx\interop\Il2Cppmscorlib.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Il2CppSystem">
-      <HintPath>I:\SteamLibrary\steamapps\common\Flipping is Hard Demo\BepInEx\interop\Il2CppSystem.dll</HintPath>
+      <HintPath>$(GamePath)\BepInEx\interop\Il2CppSystem.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.PhysicsModule">
-      <HintPath>I:\SteamLibrary\steamapps\common\Flipping is Hard Demo\BepInEx\interop\UnityEngine.PhysicsModule.dll</HintPath>
+      <HintPath>$(GamePath)\BepInEx\interop\UnityEngine.PhysicsModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.UnityWebRequestModule">
-      <HintPath>I:\SteamLibrary\steamapps\common\Flipping is Hard Demo\BepInEx\interop\UnityEngine.UnityWebRequestModule.dll</HintPath>
+      <HintPath>$(GamePath)\BepInEx\interop\UnityEngine.UnityWebRequestModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.UnityWebRequestAssetBundleModule">
-      <HintPath>I:\SteamLibrary\steamapps\common\Flipping is Hard Demo\BepInEx\interop\UnityEngine.UnityWebRequestAssetBundleModule.dll</HintPath>
+      <HintPath>$(GamePath)\BepInEx\interop\UnityEngine.UnityWebRequestAssetBundleModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.UnityWebRequestTextureModule">
-      <HintPath>I:\SteamLibrary\steamapps\common\Flipping is Hard Demo\BepInEx\interop\UnityEngine.UnityWebRequestTextureModule.dll</HintPath>
+      <HintPath>$(GamePath)\BepInEx\interop\UnityEngine.UnityWebRequestTextureModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="MagicaClothV2">
-      <HintPath>I:\SteamLibrary\steamapps\common\Flipping is Hard Demo\BepInEx\interop\MagicaClothV2.dll</HintPath>
+      <HintPath>$(GamePath)\BepInEx\interop\MagicaClothV2.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Unity.Mathematics">
-      <HintPath>I:\SteamLibrary\steamapps\common\Flipping is Hard Demo\BepInEx\interop\Unity.Mathematics.dll</HintPath>
+      <HintPath>$(GamePath)\BepInEx\interop\Unity.Mathematics.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
