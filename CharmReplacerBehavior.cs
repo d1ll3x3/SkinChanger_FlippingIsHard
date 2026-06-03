@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -24,9 +25,12 @@ namespace CharmReplacer
         private const int FastPollBudgetFrames = 180;
         private const int StableEmptyFramesToStop = 5;
 
-        // MagicaCloth2 delayed re-enable (disable → wait N frames → re-enable)
-        private MonoBehaviour _pendingClothReenable = null;
-        private int _reenableFrameDelay = 0;
+        // MagicaCloth2 delayed re-enable queue — two parallel lists so multiple cloths
+        // (e.g. local + remote player in multiplayer) can all be tracked independently.
+        // Previously a single ref meant the second ScheduleClothReenable() call
+        // overwrote the first, leaving the first cloth stuck disabled forever.
+        private readonly List<MonoBehaviour> _pendingClothList  = new List<MonoBehaviour>();
+        private readonly List<int>           _pendingClothDelays = new List<int>();
 
         // Renderer re-enable after BuildAndRun (hide during async rebuild)
         private Renderer _pendingRendererReenable = null;
@@ -51,7 +55,8 @@ namespace CharmReplacer
         {
             try
             {
-                UnityEngine.SceneManagement.SceneManager.sceneLoaded -= new Action<UnityEngine.SceneManagement.Scene, UnityEngine.SceneManagement.LoadSceneMode>(OnSceneLoaded);
+                UnityEngine.SceneManagement.SceneManager.sceneLoaded -=
+                    new Action<UnityEngine.SceneManagement.Scene, UnityEngine.SceneManagement.LoadSceneMode>(OnSceneLoaded);
             }
             catch (Exception ex)
             {
@@ -67,18 +72,23 @@ namespace CharmReplacer
                 if (CharmSystem.IsLoadingBundle)
                     CharmSystem.UpdateBundleLoading();
 
-                // MagicaCloth2 delayed re-enable
-                if (_pendingClothReenable != null)
+                // MagicaCloth2 delayed re-enable queue (multiplayer-safe)
+                for (int ci = _pendingClothList.Count - 1; ci >= 0; ci--)
                 {
-                    if (_reenableFrameDelay > 0)
+                    if (_pendingClothDelays[ci] > 0)
                     {
-                        _reenableFrameDelay--;
+                        _pendingClothDelays[ci]--;
                     }
                     else
                     {
-                        Plugin.Log.LogInfo($"[CharmPhysics] Re-enabling cloth on '{_pendingClothReenable.gameObject.name}'");
-                        _pendingClothReenable.enabled = true;
-                        _pendingClothReenable = null;
+                        var cloth = _pendingClothList[ci];
+                        if (cloth != null)
+                        {
+                            Plugin.Log.LogInfo($"[CharmPhysics] Re-enabling cloth on '{cloth.gameObject.name}'");
+                            cloth.enabled = true;
+                        }
+                        _pendingClothList.RemoveAt(ci);
+                        _pendingClothDelays.RemoveAt(ci);
                     }
                 }
 
@@ -156,7 +166,10 @@ namespace CharmReplacer
                 }
 
                 // Retry charm application periodically (handles FishNet overwrite / late spawn).
-                if (CharmState.CustomMesh != null && !CharmState.LocalCharmApplied && _charmRetries > 0)
+                // Check both CustomMesh and CustomPrefab — bundles with only a prefab (e.g. MagicaCloth)
+                // never set CustomMesh, so the old check would silently skip retries.
+                bool hasLocalCharm = CharmState.CustomMesh != null || CharmState.CustomPrefab != null;
+                if (hasLocalCharm && !CharmState.LocalCharmApplied && _charmRetries > 0)
                 {
                     _charmRetryTimer += Time.deltaTime;
                     if (_charmRetryTimer >= 2f)
@@ -218,7 +231,9 @@ namespace CharmReplacer
 
         public void ScheduleFastScans()
         {
-            _pendingScans = 5;
+            // Math.Max: cascading calls (e.g. scene load + RequestGameFastPoll within
+            // the same frame) don't reset an already-running scan sequence back to 5.
+            _pendingScans = Math.Max(_pendingScans, 5);
             _scanInterval = 1.0f;
             _nextScanDelay = 0f;
         }
@@ -245,10 +260,12 @@ namespace CharmReplacer
             if (isMainMenu || isGame)
             {
                 PlayerIdentity.ClearCaches();
+                SkinSystem.ClearMaterialCache(); // invalidate IsMaterialPhoneDefault cache
                 CharmState.SkinnedRendererIds.Clear();
                 CharmState.MenuPreviewRendererIds.Clear();
                 CharmState.MenuPreviewRootIds.Clear();
                 CharmState.CharmedMeshFilterIds.Clear();
+                CharmState.ReplacedOriginalCharmGOs.Clear(); // re-enable tracking for new scene
                 CharmState.SkinDebugLogged = false;
                 CharmState.DefaultPhoneTexture = null;
                 CharmState.DefaultPhoneTextureLogged = false;
@@ -289,8 +306,8 @@ namespace CharmReplacer
         // physics engine has time to process the mesh swap before rebinding.
         public void ScheduleClothReenable(MonoBehaviour cloth)
         {
-            _pendingClothReenable = cloth;
-            _reenableFrameDelay = 3;
+            _pendingClothList.Add(cloth);
+            _pendingClothDelays.Add(3);
         }
 
         public void ScheduleRendererReenable(Renderer renderer, int frames = 10)

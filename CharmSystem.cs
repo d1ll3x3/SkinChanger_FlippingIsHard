@@ -103,17 +103,37 @@ namespace CharmReplacer
 
         public static void TryApplyCharmToMeshFilters()
         {
-            bool useLocalPrefab = CharmState.CustomPrefab != null && PrefabHasMagicaCloth(CharmState.CustomPrefab);
+            // Resolve local player once — this result is frame-cached in PlayerIdentity,
+            // but we avoid even the cache-lookup cost by keeping a local reference.
+            var localPlayer = PlayerIdentity.GetLocalPlayerGO();
+
+            // Re-suppress original charm GOs that ChangeCharmClient may have re-activated.
+            // The game's charm system calls SetActive(true) on its own slots when syncing
+            // charm IDs by network, undoing our SetActive(false). We catch this here.
+            foreach (var kv in CharmState.ReplacedOriginalCharmGOs)
+            {
+                var go = kv.Value;
+                if (go == null) continue;
+                if (go.activeSelf)
+                {
+                    go.SetActive(false);
+                    Plugin.Log.LogDebug($"[Charm] Re-suppressed game charm re-enabled by network: '{go.name}'");
+                }
+                // Also keep the renderer hidden as a secondary guard
+                var mr2 = go.GetComponent<MeshRenderer>();
+                if (mr2 != null && mr2.enabled) mr2.enabled = false;
+            }
+
+            bool useLocalPrefab = CharmState.CustomPrefab != null && CharmState.CustomPrefabHasMagicaCloth;
 
             // === LOCAL PLAYER: full prefab when it carries its own MC2, mesh-swap fallback otherwise ===
             if (useLocalPrefab || (CharmState.CustomMesh == null && CharmState.CustomPrefab != null))
             {
                 try
                 {
-                    var playerGO = PlayerIdentity.GetLocalPlayerGO();
                     Il2CppArrayBase<MeshFilter> filters;
-                    if (playerGO != null)
-                        filters = playerGO.GetComponentsInChildren<MeshFilter>(true);
+                    if (localPlayer != null)
+                        filters = localPlayer.GetComponentsInChildren<MeshFilter>(true);
                     else
                         filters = UnityEngine.Object.FindObjectsOfType<MeshFilter>();
 
@@ -123,10 +143,10 @@ namespace CharmReplacer
                         {
                             var mf = filters[i];
                             if (mf == null || mf.sharedMesh == null) continue;
-                            if (!IsCharmTarget(mf.gameObject)) continue;
                             if (!mf.gameObject.activeSelf) continue;
+                            if (!IsCharmTarget(mf.gameObject)) continue;
 
-                            ReplaceCharmWithPrefab(mf, CharmState.CustomPrefab);
+                            ReplaceCharmWithPrefab(mf, CharmState.CustomPrefab, isLocal: true);
                             return;
                         }
                         catch (Exception ex)
@@ -144,10 +164,9 @@ namespace CharmReplacer
             {
                 try
                 {
-                    var playerGO = PlayerIdentity.GetLocalPlayerGO();
                     Il2CppArrayBase<MeshFilter> filters;
-                    if (playerGO != null)
-                        filters = playerGO.GetComponentsInChildren<MeshFilter>(true);
+                    if (localPlayer != null)
+                        filters = localPlayer.GetComponentsInChildren<MeshFilter>(true);
                     else
                         filters = UnityEngine.Object.FindObjectsOfType<MeshFilter>();
 
@@ -229,7 +248,6 @@ namespace CharmReplacer
             {
                 try
                 {
-                    var localPlayer = PlayerIdentity.GetLocalPlayerGO();
                     var allPlayers = PlayerIdentity.GetAllPlayers();
 
                     foreach (var playerGO in allPlayers)
@@ -354,7 +372,12 @@ namespace CharmReplacer
                     UnityEngine.Object.DontDestroyOnLoad(prefab);
 
                     if (playerName == null)
+                    {
                         CharmState.CustomPrefab = prefab;
+                        // Cache MagicaCloth presence so TryApplyCharmToMeshFilters
+                        // doesn't call GetComponent every scan tick.
+                        CharmState.CustomPrefabHasMagicaCloth = PrefabHasMagicaCloth(prefab);
+                    }
                     else
                         CharmState.PlayerCharmPrefabs[playerName] = prefab;
 
@@ -432,6 +455,10 @@ namespace CharmReplacer
 
         // --- Charm target detection ---
 
+        /// <summary>Returns true if this GameObject name matches the phone charm slot we replace.</summary>
+        private static bool IsExactPhoneCharm(string name) =>
+            !string.IsNullOrEmpty(name) && name.Contains("charm_phone");
+
         private static bool IsCharmTarget(GameObject go)
         {
             if (go == null) return false;
@@ -439,10 +466,6 @@ namespace CharmReplacer
             try
             {
                 string goName = (go.name ?? string.Empty).ToLowerInvariant();
-
-                bool IsExactPhoneCharm(string name) =>
-                    !string.IsNullOrEmpty(name) &&
-                    name.Contains("charm_phone");
 
                 if (IsExactPhoneCharm(goName))
                     return true;
@@ -474,6 +497,11 @@ namespace CharmReplacer
                 {
                     var mf = filters[i];
                     if (mf == null || mf.sharedMesh == null) continue;
+
+                    // Skip inactive slots — a prefab replacement may have disabled the
+                    // original SM_Charm_Phone. Without this check the mesh-swap path
+                    // would re-apply to the hidden slot, producing a duplicate charm.
+                    if (!mf.gameObject.activeSelf) continue;
 
                     int instanceId = mf.GetInstanceID();
                     if (CharmState.CharmedMeshFilterIds.Contains(instanceId)) continue;
@@ -547,7 +575,7 @@ namespace CharmReplacer
         /// Solo se usa como fallback para prefabs compuestos. Para bundles simples
         /// con MeshFilter/MeshRenderer, el camino preferido es sustituir mesh/material.
         /// </summary>
-        private static void ReplaceCharmWithPrefab(MeshFilter originalMF, GameObject prefab)
+        private static void ReplaceCharmWithPrefab(MeshFilter originalMF, GameObject prefab, bool isLocal = false)
         {
             if (prefab == null) return;
 
@@ -579,13 +607,13 @@ namespace CharmReplacer
 
             newCharm.SetActive(true);
 
-            // Diagnóstico post-activación — útil si algo se ve raro
+            // Diagnóstico post-activación — útil si algo se ve raro (nivel Debug para no ensuciar logs)
             try
             {
-                Plugin.Log.LogInfo($"[Charm] active={newCharm.activeInHierarchy} lossyScale={newCharm.transform.lossyScale} children={newCharm.transform.childCount}");
+                Plugin.Log.LogDebug($"[Charm] active={newCharm.activeInHierarchy} lossyScale={newCharm.transform.lossyScale} children={newCharm.transform.childCount}");
                 var anyR = newCharm.GetComponentInChildren<Renderer>();
                 if (anyR != null)
-                    Plugin.Log.LogInfo($"[Charm] bounds center={anyR.bounds.center} size={anyR.bounds.size}");
+                    Plugin.Log.LogDebug($"[Charm] bounds center={anyR.bounds.center} size={anyR.bounds.size}");
                 else
                     Plugin.Log.LogWarning("[Charm] No Renderer encontrado en el prefab instanciado");
             }
@@ -595,9 +623,17 @@ namespace CharmReplacer
 
             RebuildBundledMagicaCloth(newCharm);
 
+            // Disable the original charm slot. Also disable its renderer independently
+            // as a second layer — even if the game calls SetActive(true) on it again
+            // (e.g. via ChangeCharmClient network sync), the renderer stays hidden until
+            // the next scan runs the re-suppress loop at the top of TryApplyCharmToMeshFilters.
+            var originalMR = originalGO.GetComponent<MeshRenderer>();
+            if (originalMR != null) originalMR.enabled = false;
             originalGO.SetActive(false);
+
             CharmState.CharmedMeshFilterIds.Add(originalId);
-            CharmState.LocalCharmApplied = true;
+            CharmState.ReplacedOriginalCharmGOs[originalId] = originalGO; // track for re-suppress
+            if (isLocal) CharmState.LocalCharmApplied = true;  // only block retries for local player
 
             Plugin.Log.LogInfo($"[Charm] ✓ Prefab replacing '{originalGO.name}' (layer={originalGO.layer})");
         }
@@ -655,12 +691,12 @@ namespace CharmReplacer
                 var meshFilters = prefab.GetComponentsInChildren<MeshFilter>(true);
                 var cloths = prefab.GetComponentsInChildren<MagicaCloth2.MagicaCloth>(true);
 
-                Plugin.Log.LogInfo($"[CharmBundle] Prefab '{label}' contents: children={prefab.transform.childCount}, renderers={renderers?.Count ?? 0}, meshFilters={meshFilters?.Count ?? 0}, magicaCloth={cloths?.Count ?? 0}");
+                Plugin.Log.LogDebug($"[CharmBundle] Prefab '{label}' contents: children={prefab.transform.childCount}, renderers={renderers?.Count ?? 0}, meshFilters={meshFilters?.Count ?? 0}, magicaCloth={cloths?.Count ?? 0}");
 
                 for (int i = 0; i < prefab.transform.childCount; i++)
                 {
                     var child = prefab.transform.GetChild(i);
-                    Plugin.Log.LogInfo($"[CharmBundle]   child[{i}]='{child.name}' children={child.childCount}");
+                    Plugin.Log.LogDebug($"[CharmBundle]   child[{i}]='{child.name}' children={child.childCount}");
                 }
             }
             catch (Exception ex)
@@ -803,7 +839,10 @@ namespace CharmReplacer
 
         private static void ApplyCharmPrefabToPlayer(GameObject playerGO, GameObject prefab)
         {
-            var filters = playerGO.GetComponentsInChildren<MeshFilter>(true);
+            // Only scan ACTIVE MeshFilters: after placement the original SM_Charm_Phone is
+            // disabled. Including inactive (true) would find it again on the next scan and
+            // attempt a second placement — causing the double-charm bug in multiplayer.
+            var filters = playerGO.GetComponentsInChildren<MeshFilter>();
             if (filters == null) return;
 
             for (int i = 0; i < filters.Count; i++)

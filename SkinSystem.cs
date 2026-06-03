@@ -59,6 +59,17 @@ namespace CharmReplacer
         // Cache emission-related property indices per shader so we only scan once.
         private static readonly Dictionary<int, int[]> _shaderEmissionPropCache = new Dictionary<int, int[]>();
 
+        // Cache IsMaterialPhoneDefault results per material instanceId.
+        // Cleared on scene change (materials are replaced, instanceIds change anyway).
+        private static readonly Dictionary<int, bool> _materialPhoneDefaultCache = new Dictionary<int, bool>();
+
+        /// <summary>Clear all per-scene material caches. Call from OnSceneLoaded.</summary>
+        public static void ClearMaterialCache()
+        {
+            _materialPhoneDefaultCache.Clear();
+            _shaderEmissionPropCache.Clear();
+        }
+
         private static void ApplyCachedEmissionProps(Material mat, Texture emissionTex)
         {
             if (mat == null || emissionTex == null) return;
@@ -113,6 +124,19 @@ namespace CharmReplacer
         // variants (M_Phone_MissElephant, M_Phone_Base_Gold, M_Phone_Basic_Green, etc.)
         // are left untouched so the game's skin selector still works.
         public static bool IsMaterialPhoneDefault(Material mat)
+        {
+            if (mat == null) return false;
+
+            int matId = mat.GetInstanceID();
+            if (_materialPhoneDefaultCache.TryGetValue(matId, out bool cached))
+                return cached;
+
+            bool result = IsMaterialPhoneDefaultCore(mat);
+            _materialPhoneDefaultCache[matId] = result;
+            return result;
+        }
+
+        private static bool IsMaterialPhoneDefaultCore(Material mat)
         {
             if (mat == null) return false;
             string matName = (mat.name ?? string.Empty).ToLowerInvariant();

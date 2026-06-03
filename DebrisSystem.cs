@@ -6,6 +6,24 @@ namespace CharmReplacer
 {
     internal static class DebrisSystem
     {
+        // Cached reflection handles — populated on first phone-break, reused forever.
+        private static System.Type _handlerType;
+        private static System.Reflection.PropertyInfo _piDefaultVisual;
+        private static System.Reflection.PropertyInfo _piDestroyedVisual;
+        private static System.Reflection.PropertyInfo _piLastSpawnedParts;
+        private static System.Reflection.PropertyInfo _piDestroyedPartsPrefabs;
+
+        /// <summary>Get (and cache) a PropertyInfo from the handler's type.</summary>
+        private static System.Reflection.PropertyInfo GetProp(
+            object handler, string name, ref System.Reflection.PropertyInfo cache)
+        {
+            if (cache != null) return cache;
+            var type = handler.GetType();
+            if (_handlerType == null) _handlerType = type;
+            cache = type.GetProperty(name);
+            return cache;
+        }
+
         private static int SkinRendererArray(Il2CppArrayBase<Renderer> renderers, string label, Texture2D targetTex, Texture2D targetEmission)
         {
             if (renderers == null || targetTex == null) return 0;
@@ -55,28 +73,27 @@ namespace CharmReplacer
 
             try
             {
-                // Paint the shell visuals (defaultVisual / destroyedVisual). The phone's
-                // internal components ("M_Phone_Insides") are filtered out by
-                // SkinSystem.IsMaterialPhoneDefault so they keep their original textures.
-                foreach (var fieldName in new[] { "defaultVisual", "destroyedVisual" })
+                // Paint the shell visuals. Internal components (M_Phone_Insides) are filtered
+                // out by SkinSystem.IsMaterialPhoneDefault so they keep their original textures.
+                // PropertyInfo is cached statically — reflection only runs once per session.
+                var piDV  = GetProp(handler, "defaultVisual",   ref _piDefaultVisual);
+                var piDVs = GetProp(handler, "destroyedVisual", ref _piDestroyedVisual);
+
+                foreach (var pi in new[] { piDV, piDVs })
                 {
-                    var prop = handler.GetType().GetProperty(fieldName);
-                    var visualGo = prop?.GetValue(handler) as GameObject;
-                    if (visualGo != null)
-                    {
-                        var visualRenderers = visualGo.GetComponentsInChildren<Renderer>(true);
-                        int cnt = SkinRendererArray(visualRenderers, "VISUAL_" + fieldName.ToUpper(), targetTex, targetEmission);
-                        if (cnt > 0)
-                        {
-                            Plugin.Log.LogInfo($"[Skin-Pre] ✓ Visual '{fieldName}' painted ({cnt} materiales).");
-                        }
-                    }
+                    if (pi == null) continue;
+                    var visualGo = pi.GetValue(handler) as GameObject;
+                    if (visualGo == null) continue;
+                    var visualRenderers = visualGo.GetComponentsInChildren<Renderer>(true);
+                    int cnt = SkinRendererArray(visualRenderers, pi.Name.ToUpper(), targetTex, targetEmission);
+                    if (cnt > 0)
+                        Plugin.Log.LogInfo($"[Skin-Pre] ✓ Visual '{pi.Name}' painted ({cnt} materiales).");
                 }
 
                 // Paint parts that just instantiated while flying (shell fragments).
                 // Internal pieces (M_Phone_Insides) are filtered out by IsMaterialPhoneDefault.
-                var spawnedPartsProp = handler.GetType().GetProperty("lastSpawnedParts");
-                var spawnedParts = spawnedPartsProp?.GetValue(handler) as Il2CppSystem.Collections.Generic.List<GameObject>;
+                var piSpawned = GetProp(handler, "lastSpawnedParts", ref _piLastSpawnedParts);
+                var spawnedParts = piSpawned?.GetValue(handler) as Il2CppSystem.Collections.Generic.List<GameObject>;
                 if (spawnedParts != null)
                 {
                     int count = 0;
@@ -88,14 +105,12 @@ namespace CharmReplacer
                         count += SkinRendererArray(renderers, $"SPAWNED_PART_{i}", targetTex, targetEmission);
                     }
                     if (count > 0)
-                    {
                         Plugin.Log.LogInfo($"[Skin-Pre] ✓ {count} materials applied to flying debris instantly.");
-                    }
                 }
 
                 // Pre-paint prefabs so future spawns are already skinned.
-                var prefabsProp = handler.GetType().GetProperty("destroyedPartsPrefabs");
-                var prefabsList = prefabsProp?.GetValue(handler) as Il2CppSystem.Collections.Generic.List<GameObject>;
+                var piPrefabs = GetProp(handler, "destroyedPartsPrefabs", ref _piDestroyedPartsPrefabs);
+                var prefabsList = piPrefabs?.GetValue(handler) as Il2CppSystem.Collections.Generic.List<GameObject>;
                 if (prefabsList != null)
                 {
                     for (int i = 0; i < prefabsList.Count; i++)

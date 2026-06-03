@@ -14,9 +14,19 @@ namespace CharmReplacer
         // logs only on first observation.
         private static readonly HashSet<string> _loggedNicknameResolutions = new HashSet<string>(StringComparer.Ordinal);
 
+        // Candidate property/field names to try for nickname (ordered by likelihood).
+        // Static readonly to avoid a new array allocation on every cache miss.
+        private static readonly string[] s_nicknameCandidates =
+        {
+            "NicknameSyncVar", "Nickname", "SteamName",
+            "Username", "PlayerName", "Name", "DisplayName"
+        };
+
         // --- Per-frame caches (cleared on scene change) ---
         private static int _cachedFrame = -1;
         private static List<GameObject> _cachedAllPlayers;
+        private static int _cachedLocalPlayerFrame = -1;
+        private static GameObject _cachedLocalPlayer;
         private static readonly Dictionary<int, string> _nicknameCache = new Dictionary<int, string>();
 
         public static string GetPlayerNickname(GameObject p)
@@ -54,12 +64,7 @@ namespace CharmReplacer
                     }
 
                     // Candidate property/field names to try (ordered by likelihood)
-                    string[] candidateNames = {
-                        "NicknameSyncVar", "Nickname", "SteamName",
-                        "Username", "PlayerName", "Name", "DisplayName"
-                    };
-
-                    foreach (var name in candidateNames)
+                    foreach (var name in s_nicknameCandidates)
                     {
                         // --- Try as PROPERTY ---
                         var prop = il2CppType.GetProperty(name);
@@ -200,12 +205,18 @@ namespace CharmReplacer
             {
                 var tagged = GameObject.FindGameObjectsWithTag("Player");
                 if (tagged != null) list.AddRange(tagged);
-                
-                var networked = UnityEngine.Object.FindObjectsOfType<MonoBehaviour>();
-                foreach (var n in networked)
+
+                // Only do the expensive MonoBehaviour scan when the tag-based search found nothing.
+                // In a running game players are properly tagged, so this avoids iterating
+                // every MonoBehaviour in the scene on every cache miss.
+                if (list.Count == 0)
                 {
-                    if (n != null && n.GetIl2CppType() != null && n.GetIl2CppType().Name == "PlayerNetworked" && !list.Contains(n.gameObject))
-                        list.Add(n.gameObject);
+                    var networked = UnityEngine.Object.FindObjectsOfType<MonoBehaviour>();
+                    foreach (var n in networked)
+                    {
+                        if (n != null && n.GetIl2CppType() != null && n.GetIl2CppType().Name == "PlayerNetworked")
+                            list.Add(n.gameObject);
+                    }
                 }
             }
             catch { }
@@ -220,6 +231,8 @@ namespace CharmReplacer
         {
             _cachedFrame = -1;
             _cachedAllPlayers = null;
+            _cachedLocalPlayerFrame = -1;
+            _cachedLocalPlayer = null;
             _nicknameCache.Clear();
         }
 
@@ -261,6 +274,12 @@ namespace CharmReplacer
 
         public static GameObject GetLocalPlayerGO()
         {
+            // Frame-cached: IsLocalPlayer uses GetComponents + reflection; reuse within same frame.
+            int currentFrame = Time.frameCount;
+            if (_cachedLocalPlayerFrame == currentFrame && _cachedLocalPlayer != null)
+                return _cachedLocalPlayer;
+
+            GameObject result = null;
             try
             {
                 var allPlayers = GetAllPlayers();
@@ -268,29 +287,31 @@ namespace CharmReplacer
                 // 100% Safe Criteria: The network owner
                 foreach (var p in allPlayers)
                 {
-                    if (IsLocalPlayer(p)) return p;
+                    if (IsLocalPlayer(p)) { result = p; break; }
                 }
 
                 // Fallback for lobby: Distance to Camera.main
-                if (Camera.main != null && allPlayers.Count > 0)
+                if (result == null && Camera.main != null && allPlayers.Count > 0)
                 {
                     GameObject best = null;
                     float bestDist = float.MaxValue;
                     var camPos = Camera.main.transform.position;
-                    
+
                     foreach (var p in allPlayers)
                     {
                         if (p == null) continue;
                         float d = Vector3.Distance(p.transform.position, camPos);
                         if (d < bestDist) { bestDist = d; best = p; }
                     }
-                    
-                    if (best != null && bestDist <= 10f) return best;
+
+                    if (best != null && bestDist <= 10f) result = best;
                 }
             }
             catch { }
 
-            return null;
+            _cachedLocalPlayerFrame = currentFrame;
+            _cachedLocalPlayer = result;
+            return result;
         }
 
         private static void DumpTypeMembers(Il2CppSystem.Type il2CppType)

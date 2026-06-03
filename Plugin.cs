@@ -18,7 +18,7 @@ using DrawingColor = System.Drawing.Color;
 
 namespace CharmReplacer;
 
-[BepInPlugin("com.dani.charmreplacer", "CharmReplacer", "2.8.0")]
+[BepInPlugin("com.dani.charmreplacer", "CharmReplacer", "2.8.1")]
 public class Plugin : BasePlugin
 {
     internal static new ManualLogSource Log;
@@ -173,17 +173,27 @@ public class Plugin : BasePlugin
         }
     }
 
+    private static readonly Dictionary<string, Type> _typeCache = new Dictionary<string, Type>();
+
     internal static Type FindGameType(string fullName)
     {
+        if (_typeCache.TryGetValue(fullName, out var cached))
+            return cached;
+
         foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
         {
             try
             {
                 var t = asm.GetType(fullName, false);
-                if (t != null) return t;
+                if (t != null)
+                {
+                    _typeCache[fullName] = t;
+                    return t;
+                }
             }
             catch { }
         }
+        _typeCache[fullName] = null; // cache "not found" to skip future scans
         return null;
     }
 }
