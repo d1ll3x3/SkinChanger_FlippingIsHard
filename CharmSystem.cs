@@ -40,6 +40,26 @@ namespace CharmReplacer
             }
         }
 
+        /// <summary>
+        /// Enqueues a bundle downloaded at runtime (remote skins/charms). The file name is
+        /// the player's nick, so StartNextBundle associates it with that player automatically.
+        /// Starts loading if the queue is idle.
+        /// </summary>
+        public static void EnqueueRemoteCharmBundle(string path, string nick)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+                _charmBundleQueue.Enqueue(path);
+                Plugin.Log.LogInfo($"[Charm] ✓ Queued remote bundle for: {nick}");
+                if (!_isLoadingBundle) StartNextBundle();
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogError($"[Charm] EnqueueRemoteCharmBundle error: {ex}");
+            }
+        }
+
         public static void UpdateBundleLoading()
         {
             if (!_isLoadingBundle) return;
@@ -881,26 +901,25 @@ namespace CharmReplacer
 
                     Plugin.Log.LogInfo($"[CharmPhysics] Found {typeName} on '{mb.gameObject.name}'");
 
-                    bool rebuilt = false;
+                    // IMPORTANT: this is the game's OWN MagicaCloth on the original charm slot,
+                    // already built against the original mesh. The mesh-swap path can only call
+                    // BuildAndRun() on it, which MagicaCloth2 refuses once built ("[MC2] Already
+                    // built."), so the cloth keeps simulating the original topology and the swapped
+                    // custom mesh hangs static. There is no cloth data in a mesh-only bundle to
+                    // simulate the new mesh. For working physics the charm bundle must ship its own
+                    // pre-configured MagicaCloth2 component (the prefab path).
                     try
                     {
                         var mc2 = mb.TryCast<MagicaCloth2.MagicaCloth>();
-                        if (mc2 != null) { mc2.BuildAndRun(); Plugin.Log.LogInfo("[CharmPhysics] ✓ BuildAndRun via TryCast"); rebuilt = true; }
+                        if (mc2 != null) mc2.BuildAndRun();
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[CharmPhysics] TryCast: {ex.Message}"); }
 
-                    if (!rebuilt)
-                    {
-                        try
-                        {
-                            var m = mb.GetIl2CppType().GetMethod("BuildAndRun",
-                                Il2CppSystem.Reflection.BindingFlags.Public | Il2CppSystem.Reflection.BindingFlags.Instance);
-                            if (m != null) { m.Invoke(mb, null); Plugin.Log.LogInfo("[CharmPhysics] ✓ BuildAndRun via reflection"); rebuilt = true; }
-                        }
-                        catch (Exception ex) { Plugin.Log.LogWarning($"[CharmPhysics] Reflection: {ex.Message}"); }
-                    }
-
-                    if (!rebuilt) { mb.enabled = false; CharmReplacerBehavior.Instance?.ScheduleClothReenable(mb); }
+                    Plugin.Log.LogWarning(
+                        "[CharmPhysics] Mesh-swap path cannot drive cloth physics: it reuses the " +
+                        "game's already-built MagicaCloth, which won't rebind to a different mesh. " +
+                        "For a charm with physics, export its prefab WITH a configured MagicaCloth2 " +
+                        "component so it loads via the prefab path.");
 
                     return;
                 }

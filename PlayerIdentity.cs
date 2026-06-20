@@ -136,6 +136,117 @@ namespace CharmReplacer
             return string.Empty;
         }
 
+        // Candidate property/field names for a Steam ID (ordered by likelihood).
+        // The game uses FishNet-style networking, so a numeric Steam ID is NOT
+        // guaranteed to be synced. This degrades to string.Empty when absent and
+        // RemoteSkinService falls back to matching by nickname.
+        private static readonly string[] s_steamIdCandidates =
+        {
+            "SteamId", "SteamID", "OwnerSteamId", "SteamIdSyncVar",
+            "OwnerId", "ClientId"
+        };
+
+        private static readonly Dictionary<int, string> _steamIdCache = new Dictionary<int, string>();
+
+        /// <summary>
+        /// Best-effort Steam ID extraction for a player. Returns string.Empty if the
+        /// game does not expose a numeric Steam ID on PlayerNetworked (matching then
+        /// falls back to nickname). The PlayerNetworked member dump logged on first
+        /// encounter (see DumpTypeMembers) confirms which member, if any, carries it.
+        /// </summary>
+        public static string GetPlayerSteamId(GameObject p)
+        {
+            if (p == null) return string.Empty;
+            int instanceId = p.GetInstanceID();
+            if (_steamIdCache.TryGetValue(instanceId, out var cached))
+                return cached;
+
+            string result = string.Empty;
+            try
+            {
+                var mbs = p.GetComponents<MonoBehaviour>();
+                MonoBehaviour netObj = null;
+                foreach (var mb in mbs)
+                {
+                    if (mb != null && mb.GetIl2CppType() != null && mb.GetIl2CppType().Name == "PlayerNetworked")
+                    {
+                        netObj = mb;
+                        break;
+                    }
+                }
+
+                if (netObj != null)
+                {
+                    var il2CppType = netObj.GetIl2CppType();
+                    foreach (var name in s_steamIdCandidates)
+                    {
+                        var prop = il2CppType.GetProperty(name);
+                        if (prop != null)
+                        {
+                            try
+                            {
+                                var getter = prop.GetGetMethod();
+                                var res = getter?.Invoke(netObj, null);
+                                string id = TryExtractId(res);
+                                if (!string.IsNullOrEmpty(id)) { result = id; break; }
+                            }
+                            catch { }
+                        }
+
+                        var field = il2CppType.GetField(name);
+                        if (field != null)
+                        {
+                            try
+                            {
+                                var val = field.GetValue(netObj);
+                                string id = TryExtractId(val);
+                                if (!string.IsNullOrEmpty(id)) { result = id; break; }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogDebug($"[PlayerIdentity] GetPlayerSteamId error: {ex.Message}");
+            }
+
+            _steamIdCache[instanceId] = result;
+            return result;
+        }
+
+        /// <summary>
+        /// Extract a numeric id (Steam IDs are 64-bit) from an Il2Cpp object, unwrapping
+        /// a SyncVar/NetworkVar wrapper if needed. Returns null when not a usable number.
+        /// </summary>
+        private static string TryExtractId(Il2CppSystem.Object obj)
+        {
+            if (obj == null) return null;
+            try
+            {
+                // Direct unbox attempts for the common integer widths.
+                try { var v = obj.Unbox<ulong>(); if (v != 0) return v.ToString(); } catch { }
+                try { var v = obj.Unbox<long>();  if (v != 0) return v.ToString(); } catch { }
+                try { var v = obj.Unbox<uint>();  if (v != 0) return v.ToString(); } catch { }
+
+                // SyncVar/NetworkVar<T> wrapper: read .Value then recurse once.
+                var objType = obj.GetIl2CppType();
+                var valueProp = objType?.GetProperty("Value");
+                if (valueProp != null)
+                {
+                    var inner = valueProp.GetGetMethod()?.Invoke(obj, null);
+                    if (inner != null && inner.Pointer != obj.Pointer)
+                    {
+                        try { var v = inner.Unbox<ulong>(); if (v != 0) return v.ToString(); } catch { }
+                        try { var v = inner.Unbox<long>();  if (v != 0) return v.ToString(); } catch { }
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
         /// <summary>
         /// Try to extract a managed string from an Il2Cpp object.
         /// If the object itself is a string, extract it directly.
@@ -234,6 +345,7 @@ namespace CharmReplacer
             _cachedLocalPlayerFrame = -1;
             _cachedLocalPlayer = null;
             _nicknameCache.Clear();
+            _steamIdCache.Clear();
         }
 
         public static bool IsLocalPlayer(GameObject p)

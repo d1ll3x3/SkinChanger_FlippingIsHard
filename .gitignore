@@ -2,6 +2,8 @@
 bin/
 obj/
 ReleaseBuild/
+release_build/
+release_notes.md
 
 # IDE
 .vs/

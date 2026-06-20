@@ -8,6 +8,7 @@ Unity 		-> Magica Cloth presets for charm (charm2 is the best) can be anywhere i
 Donut Charm 	-> model: Donut_Charm.fbx 		textures: donut_charm.png
 ----------------------------------------------------------------
 
+Unity charm physics	-> REQUIRED for physics: the prefab you bundle MUST have a configured MagicaCloth 2 component on it. A mesh-only bundle (mesh + material, no MagicaCloth2) loads and shows the charm, but it will hang STATIC with no physics. The mod cannot add physics a bundle does not contain.
 Unity charm physics	-> Magica Cloth 2 (if the mesh does not load: Right click on Project -> Create -> MonoBehaviourScript -> Delete the script)
 Unity charm physics	-> Magica Cloth 2 Script. Right click on Project -> Create -> MagicaCloth2 -> PreBuildScriptableObject
 Unity bundle export	-> hatbundle (BuildBundle.cs)

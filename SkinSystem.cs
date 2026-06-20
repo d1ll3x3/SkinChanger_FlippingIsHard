@@ -240,7 +240,23 @@ namespace CharmReplacer
             }
         }
 
-        private static bool RendererNeedsReSkin(Renderer ren, Texture2D targetTex)
+        // Emission map property names ApplySkinTexture writes to. Shared so the
+        // re-skin guard checks the same slots the painter sets.
+        private static readonly string[] s_emissionMapProps =
+            { "_EmissionMap", "_EmissiveColorMap", "_EmissionTex", "_EmissionMask" };
+
+        /// <summary>True if the material already carries <paramref name="target"/> in any emission map slot.</summary>
+        private static bool EmissionApplied(Material m, Texture target)
+        {
+            foreach (var propName in s_emissionMapProps)
+            {
+                if (m.HasProperty(propName) && m.GetTexture(propName) == target)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool RendererNeedsReSkin(Renderer ren, Texture2D targetTex, Texture2D targetEmission)
         {
             if (ren == null) return true;
             var mats = ren.sharedMaterials;
@@ -251,6 +267,10 @@ namespace CharmReplacer
                 if (!IsMaterialPhoneDefault(m)) continue;
                 var currentTex = m.HasProperty("_MainTex") ? m.GetTexture("_MainTex") : null;
                 if (currentTex != targetTex) return true;
+                // Emission arrives a moment after the base skin for remote players;
+                // without this the renderer is marked "known" and the later-arriving
+                // emission map is never applied.
+                if (targetEmission != null && !EmissionApplied(m, targetEmission)) return true;
             }
             return false;
         }
@@ -324,7 +344,7 @@ namespace CharmReplacer
                         bool isKnown = CharmState.SkinnedRendererIds.Contains(ren.GetInstanceID());
                         if (isKnown)
                         {
-                            if (!RendererNeedsReSkin(ren, targetTex)) continue;
+                            if (!RendererNeedsReSkin(ren, targetTex, targetEmission)) continue;
                             CharmState.SkinnedRendererIds.Remove(ren.GetInstanceID());
                         }
 

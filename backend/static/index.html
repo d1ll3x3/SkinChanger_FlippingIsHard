@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Charm &amp; Skin Replacer — Upload</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem;
+         background: #14151a; color: #e6e6e6; }
+  h1 { font-size: 1.5rem; }
+  h2 { font-size: 1.05rem; margin: 0 0 .75rem; }
+  a { color: #6ea8fe; cursor: pointer; }
+  .card { background: #1e2027; border: 1px solid #2c2f3a; border-radius: 12px; padding: 1.25rem; margin: 1rem 0; }
+  .row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+  label { display: block; font-size: .85rem; color: #aab; margin-bottom: .35rem; }
+  input[type=text] { background: #14151a; border: 1px solid #2c2f3a; color: #e6e6e6;
+                     border-radius: 8px; padding: .5rem .6rem; font-size: .9rem; width: 100%; box-sizing: border-box; }
+  input[type=file] { width: 100%; }
+  .field { flex: 1 1 240px; }
+  button { background: #3d6fe0; color: #fff; border: 0; border-radius: 8px; padding: .55rem 1rem;
+           font-size: .9rem; cursor: pointer; white-space: nowrap; }
+  button.secondary { background: #2c2f3a; }
+  button:disabled { opacity: .5; cursor: default; }
+  .muted { color: #8a8f9c; font-size: .85rem; }
+  .status { margin-top: .5rem; font-size: .85rem; min-height: 1.2em; }
+  .ok { color: #5ad17f; } .err { color: #ff7676; }
+  .badge { display: inline-block; background: #2c2f3a; border-radius: 6px; padding: .1rem .5rem; font-size: .75rem; }
+  details { margin-top: .4rem; font-size: .85rem; color: #aab; }
+  details summary { cursor: pointer; color: #6ea8fe; }
+  details ol { margin: .5rem 0 0; padding-left: 1.2rem; }
+  .hint { font-size: .8rem; color: #8a8f9c; margin-top: .25rem; }
+</style>
+</head>
+<body>
+<h1>🧢 Charm &amp; Skin Replacer</h1>
+<p class="muted">Upload your skin and charm once. Anyone running the mod will see them
+automatically in-game, matched to your Steam account. No accounts, no login — just paste
+your details below.</p>
+
+<!-- Identity -->
+<div class="card">
+  <h2>1. Who are you?</h2>
+
+  <label>Paste your Steam profile URL to auto-detect</label>
+  <div class="row">
+    <input type="text" id="profile" placeholder="https://steamcommunity.com/id/yourname  or  /profiles/7656119…"
+           style="flex:1 1 320px">
+    <button id="detect">Detect</button>
+  </div>
+  <div class="hint" id="detectStatus"></div>
+
+  <p class="hint">We use your <b>Steam name</b> to match your skin in-game, and we also save
+     your <b>Steam ID</b> so your skin keeps working even if you change your Steam name later.</p>
+
+  <p class="hint"><a id="manualToggle">Auto-detect didn't work? Enter your details manually →</a></p>
+
+  <!-- Manual entry: hidden until detect fails or the user opts in -->
+  <div id="manual" hidden style="margin-top:.5rem">
+    <div class="row">
+      <div class="field">
+        <label>Steam name <span class="muted">(required — exactly as it shows in-game)</span></label>
+        <input type="text" id="name" placeholder="e.g. ElProGamer">
+        <details>
+          <summary>How do I find my Steam name?</summary>
+          <ol>
+            <li>Open Steam and click your name (top-right) → <b>View my profile</b>.</li>
+            <li>The big name at the top is your display name.</li>
+            <li>Type it <b>exactly</b> as it appears, including caps and symbols — it must
+                match the name other players see in-game.</li>
+          </ol>
+          <p>Still stuck? <a href="https://steamid.xyz" target="_blank" rel="noopener">Open steamid.xyz</a>
+             — it shows your name and IDs in one place.</p>
+        </details>
+      </div>
+
+      <div class="field">
+        <label>Steam ID <span class="muted">(optional, recommended)</span></label>
+        <input type="text" id="steamid" placeholder="17-digit SteamID64">
+        <details>
+          <summary>How do I find my Steam ID?</summary>
+          <ol>
+            <li>Open your Steam profile in a browser.</li>
+            <li>Copy the page URL and paste it in the box above, then press <b>Detect</b>
+                (works for both <code>/id/yourname</code> and <code>/profiles/7656119…</code> URLs).</li>
+            <li>If your URL looks like <code>/profiles/7656119…</code>, the long number is your Steam ID.</li>
+          </ol>
+          <p>Can't get it? <a href="https://steamid.xyz" target="_blank" rel="noopener">Open steamid.xyz</a>,
+             copy the <b>SteamID64</b> (17 digits), and paste it in the Steam ID box.</p>
+        </details>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Uploads -->
+<div class="card">
+  <div class="row" style="justify-content:space-between">
+    <h2 style="margin:0">2. Upload your files</h2>
+    <button class="secondary" id="refresh">Check what I've uploaded</button>
+  </div>
+
+  <div class="asset" data-kind="skin" style="margin-top:1rem">
+    <label>Skin (PNG) <span class="badge slot">—</span></label>
+    <input type="file" accept="image/png">
+    <div class="row" style="margin-top:.5rem">
+      <button class="up">Upload</button>
+      <button class="secondary del">Delete</button>
+    </div>
+    <div class="status"></div>
+  </div>
+
+  <hr style="border-color:#2c2f3a;margin:1rem 0">
+
+  <div class="asset" data-kind="emission">
+    <label>Emission map (PNG, optional) <span class="badge slot">—</span></label>
+    <input type="file" accept="image/png">
+    <div class="row" style="margin-top:.5rem">
+      <button class="up">Upload</button>
+      <button class="secondary del">Delete</button>
+    </div>
+    <div class="status"></div>
+  </div>
+
+  <hr style="border-color:#2c2f3a;margin:1rem 0">
+
+  <div class="asset" data-kind="charm">
+    <label>Charm (hatbundle) <span class="badge slot">—</span></label>
+    <input type="file">
+    <div class="row" style="margin-top:.5rem">
+      <button class="up">Upload</button>
+      <button class="secondary del">Delete</button>
+    </div>
+    <div class="status"></div>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+
+function identity() {
+  return { name: $('#name').value.trim(), steamid: $('#steamid').value.trim() };
+}
+
+function setStatus(el, msg, ok) {
+  el.textContent = msg;
+  el.className = (el.classList.contains('hint') ? 'hint ' : 'status ') + (ok ? 'ok' : 'err');
+}
+
+function showManual() { $('#manual').hidden = false; }
+
+// Reveal manual fields when the user explicitly asks.
+$('#manualToggle').addEventListener('click', showManual);
+
+// --- Detect Steam ID from a profile URL / raw value ---
+$('#detect').addEventListener('click', async () => {
+  const val = $('#profile').value.trim();
+  if (!val) { setStatus($('#detectStatus'), 'Paste a profile URL or Steam ID first.', false); return; }
+  $('#detect').disabled = true;
+  try {
+    const fd = new FormData(); fd.append('value', val);
+    const r = await fetch('/api/resolve', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (r.ok) {
+      $('#steamid').value = j.steamid || '';
+      if (j.name) $('#name').value = j.name;
+      // Reveal the (now pre-filled) fields so the user can confirm or fix the name.
+      showManual();
+      setStatus($('#detectStatus'),
+        'Detected ✓' + (j.name ? ` — name: ${j.name}` : '') +
+        '. Check the fields below and adjust the name if it differs from your in-game name.', true);
+    } else {
+      // On failure, reveal the manual fields so the user can fill them by hand.
+      showManual();
+      setStatus($('#detectStatus'), (j.detail || 'Could not detect.') + ' Enter your details manually below.', false);
+    }
+  } catch (e) { showManual(); setStatus($('#detectStatus'), 'Network error. Enter your details manually below.', false); }
+  $('#detect').disabled = false;
+});
+
+// --- Refresh upload status for the current identity ---
+$('#refresh').addEventListener('click', refreshStatus);
+async function refreshStatus() {
+  const id = identity();
+  if (!id.name && !id.steamid) return;
+  const q = new URLSearchParams(id).toString();
+  try {
+    const me = await fetch('/api/record?' + q).then(r => r.json());
+    for (const card of document.querySelectorAll('.asset')) {
+      const kind = card.dataset.kind;
+      card.querySelector('.slot').textContent = me.assets[kind] ? 'uploaded ✓' : 'empty';
+    }
+  } catch (e) { /* ignore */ }
+}
+
+// --- Upload / delete ---
+document.addEventListener('click', async (e) => {
+  const card = e.target.closest('.asset');
+  if (!card) return;
+  const kind = card.dataset.kind;
+  const id = identity();
+
+  if (e.target.classList.contains('up')) {
+    if (!id.name) { setStatus(card.querySelector('.status'), 'Enter your Steam name first.', false); return; }
+    const input = card.querySelector('input[type=file]');
+    if (!input.files.length) { setStatus(card.querySelector('.status'), 'Choose a file first.', false); return; }
+    const fd = new FormData();
+    fd.append('kind', kind);
+    fd.append('name', id.name);
+    fd.append('steamid', id.steamid);
+    fd.append('file', input.files[0]);
+    e.target.disabled = true;
+    try {
+      const r = await fetch('/api/upload', { method: 'POST', body: fd });
+      const j = await r.json();
+      if (r.ok) { setStatus(card.querySelector('.status'), 'Uploaded ✓', true); refreshStatus(); }
+      else setStatus(card.querySelector('.status'), j.detail || 'Upload failed.', false);
+    } catch (err) { setStatus(card.querySelector('.status'), 'Network error.', false); }
+    e.target.disabled = false;
+  }
+
+  if (e.target.classList.contains('del')) {
+    if (!id.name && !id.steamid) { setStatus(card.querySelector('.status'), 'Enter your identity first.', false); return; }
+    e.target.disabled = true;
+    try {
+      const q = new URLSearchParams(id).toString();
+      const r = await fetch('/api/asset/' + kind + '?' + q, { method: 'DELETE' });
+      const j = await r.json();
+      if (r.ok) { setStatus(card.querySelector('.status'), 'Deleted.', true); refreshStatus(); }
+      else setStatus(card.querySelector('.status'), j.detail || 'Delete failed.', false);
+    } catch (err) { setStatus(card.querySelector('.status'), 'Network error.', false); }
+    e.target.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

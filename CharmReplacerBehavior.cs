@@ -39,16 +39,34 @@ namespace CharmReplacer
         public void Awake()
         {
             Instance = this;
+
+            // Each subsystem is isolated so one failure (e.g. a missing dependency DLL while
+            // decoding a PNG) can't cascade and disable the others — notably it must not stop
+            // remote skins from starting.
             try
             {
                 UnityEngine.SceneManagement.SceneManager.sceneLoaded += new Action<UnityEngine.SceneManagement.Scene, UnityEngine.SceneManagement.LoadSceneMode>(OnSceneLoaded);
-                CharmSystem.LoadCharmMesh();
-                SkinLoader.LoadCustomSkin();
             }
-            catch (Exception ex)
+            catch (Exception ex) { Plugin.Log.LogError($"[CharmReplacerBehavior] sceneLoaded hook error: {ex}"); }
+
+            // Create the drop-in folders so users can place files by hand without making them.
+            try
             {
-                Plugin.Log.LogError($"[CharmReplacerBehavior] Awake error: {ex}");
+                System.IO.Directory.CreateDirectory(System.IO.Path.Combine(Plugin.PluginDirectory, "Skins"));
+                System.IO.Directory.CreateDirectory(System.IO.Path.Combine(Plugin.PluginDirectory, "Charms"));
             }
+            catch (Exception ex) { Plugin.Log.LogError($"[CharmReplacerBehavior] Folder creation error: {ex}"); }
+
+            try { CharmSystem.LoadCharmMesh(); }
+            catch (Exception ex) { Plugin.Log.LogError($"[CharmReplacerBehavior] LoadCharmMesh error: {ex}"); }
+
+            try { SkinLoader.LoadCustomSkin(); }
+            catch (Exception ex) { Plugin.Log.LogError($"[CharmReplacerBehavior] LoadCustomSkin error: {ex}"); }
+
+            // Remote skins: runs AFTER the local loaders so hand-placed files take precedence
+            // (they are not re-downloaded).
+            try { RemoteSkinService.BeginManifestFetch(); }
+            catch (Exception ex) { Plugin.Log.LogError($"[CharmReplacerBehavior] BeginManifestFetch error: {ex}"); }
         }
 
         public void OnDestroy()
@@ -71,6 +89,9 @@ namespace CharmReplacer
                 // Only tick bundle loading state machine when a load is in flight
                 if (CharmSystem.IsLoadingBundle)
                     CharmSystem.UpdateBundleLoading();
+
+                // Remote skins/charms: manifest + download queue.
+                RemoteSkinService.Tick();
 
                 // MagicaCloth2 delayed re-enable queue (multiplayer-safe)
                 for (int ci = _pendingClothList.Count - 1; ci >= 0; ci--)

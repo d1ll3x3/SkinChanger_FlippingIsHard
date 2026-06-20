@@ -30,6 +30,15 @@ public class Plugin : BasePlugin
         Log = base.Log;
         PluginDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
 
+        // --- Config: remote skins backend ---
+        var enableRemote = Config.Bind("RemoteSkins", "Enabled", true,
+            "Automatically download skins/charms from the web backend.");
+        var backendUrl = Config.Bind("RemoteSkins", "BackendBaseUrl",
+            "https://raw.githubusercontent.com/d1ll3x3/charm-skins-data/main",
+            "Backend base URL (raw GitHub base of the skins data repo). Empty = disabled.");
+        RemoteSkinService.Enabled = enableRemote.Value && !string.IsNullOrWhiteSpace(backendUrl.Value);
+        RemoteSkinService.BaseUrl = backendUrl.Value?.Trim();
+
         ClassInjector.RegisterTypeInIl2Cpp<CharmReplacerBehavior>();
         AddComponent<CharmReplacerBehavior>();
 

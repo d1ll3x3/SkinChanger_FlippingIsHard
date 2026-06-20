@@ -1,0 +1,20 @@
+# Render Blueprint (https://render.com) — free, no credit card required.
+# Deploy: push this repo to GitHub, then in Render: New + → Blueprint → pick this repo.
+# After it deploys, set GITHUB_REPO and GITHUB_TOKEN in the service's Environment tab.
+services:
+  - type: web
+    name: charm-skin-backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      # The PUBLIC GitHub repo that stores the skins/charms (format: owner/name).
+      - key: GITHUB_REPO
+        sync: false
+      # Fine-grained token with Contents: Read and write on that repo. Set as a secret.
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_BRANCH
+        value: main
