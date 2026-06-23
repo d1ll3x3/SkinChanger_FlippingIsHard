@@ -63,7 +63,7 @@ import store as storage
 # Config
 # ──────────────────────────────────────────────────────────────────────────────
 
-MAX_IMAGE_BYTES = int(os.environ.get("MAX_IMAGE_BYTES", str(4 * 1024 * 1024)))
+MAX_IMAGE_BYTES = int(os.environ.get("MAX_IMAGE_BYTES", str(16 * 1024 * 1024)))
 MAX_CHARM_BYTES = int(os.environ.get("MAX_CHARM_BYTES", str(25 * 1024 * 1024)))
 
 KINDS = storage.KINDS
