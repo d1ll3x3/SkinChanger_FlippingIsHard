@@ -945,25 +945,22 @@ namespace CharmReplacer
 
                     Plugin.Log.LogInfo($"[CharmPhysics] Found {typeName} on '{mb.gameObject.name}'");
 
-                    // IMPORTANT: this is the game's OWN MagicaCloth on the original charm slot,
-                    // already built against the original mesh. The mesh-swap path can only call
-                    // BuildAndRun() on it, which MagicaCloth2 refuses once built ("[MC2] Already
-                    // built."), so the cloth keeps simulating the original topology and the swapped
-                    // custom mesh hangs static. There is no cloth data in a mesh-only bundle to
-                    // simulate the new mesh. For working physics the charm bundle must ship its own
-                    // pre-configured MagicaCloth2 component (the prefab path).
+                    // This is the game's OWN MagicaCloth on the original charm slot. A mesh-only
+                    // charm reuses it: we swap the mesh and rebuild the cloth so it simulates the
+                    // NEW mesh. The catch is that the game already built this cloth (against the
+                    // original mesh) the moment the phone spawned, so a plain BuildAndRun() is a
+                    // no-op ("[MC2] Already built") and the charm hangs static — EXCEPT after a
+                    // graceful restart, where the cloth respawns fresh (unbuilt) and BuildAndRun
+                    // succeeds (that's why it only worked after a restart). To get it on the first
+                    // load too, force a re-initialise: disable the cloth now, then re-enable +
+                    // BuildAndRun a few frames later so it rebuilds against the swapped mesh.
                     try
                     {
-                        var mc2 = mb.TryCast<MagicaCloth2.MagicaCloth>();
-                        if (mc2 != null) mc2.BuildAndRun();
+                        mb.enabled = false;
+                        CharmReplacerBehavior.Instance?.ScheduleClothRebuild(mb, 4);
+                        Plugin.Log.LogInfo($"[CharmPhysics] Scheduled game-cloth rebuild on '{mb.gameObject.name}' (replicating the restart's fresh build).");
                     }
-                    catch (Exception ex) { Plugin.Log.LogWarning($"[CharmPhysics] TryCast: {ex.Message}"); }
-
-                    Plugin.Log.LogWarning(
-                        "[CharmPhysics] Mesh-swap path cannot drive cloth physics: it reuses the " +
-                        "game's already-built MagicaCloth, which won't rebind to a different mesh. " +
-                        "For a charm with physics, export its prefab WITH a configured MagicaCloth2 " +
-                        "component so it loads via the prefab path.");
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[CharmPhysics] Rebuild schedule error: {ex.Message}"); }
 
                     return;
                 }

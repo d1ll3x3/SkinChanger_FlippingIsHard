@@ -32,6 +32,13 @@ namespace CharmReplacer
         private readonly List<MonoBehaviour> _pendingClothList  = new List<MonoBehaviour>();
         private readonly List<int>           _pendingClothDelays = new List<int>();
 
+        // Delayed re-enable + BuildAndRun for the game's MagicaCloth after a mesh-only charm
+        // swaps the phone-charm mesh. The cloth is disabled at swap time; a few frames later we
+        // re-enable and rebuild so it re-initialises against the NEW mesh — giving physics on
+        // the first load (not only after a graceful restart).
+        private readonly List<MonoBehaviour> _pendingClothRebuild  = new List<MonoBehaviour>();
+        private readonly List<int>           _pendingClothRebuildDelays = new List<int>();
+
         // Renderer re-enable after BuildAndRun (hide during async rebuild)
         private Renderer _pendingRendererReenable = null;
         private int _rendererReenableDelay = 0;
@@ -122,6 +129,34 @@ namespace CharmReplacer
                         _pendingRendererReenable.enabled = true;
                         Plugin.Log.LogDebug($"[CharmPhysics] Renderer re-enabled on '{_pendingRendererReenable.gameObject.name}'");
                         _pendingRendererReenable = null;
+                    }
+                }
+
+                // Game-cloth rebuild after a mesh-only charm swap (re-enable + BuildAndRun)
+                for (int ri = _pendingClothRebuild.Count - 1; ri >= 0; ri--)
+                {
+                    if (_pendingClothRebuildDelays[ri] > 0)
+                    {
+                        _pendingClothRebuildDelays[ri]--;
+                        continue;
+                    }
+                    var cloth = _pendingClothRebuild[ri];
+                    _pendingClothRebuild.RemoveAt(ri);
+                    _pendingClothRebuildDelays.RemoveAt(ri);
+                    if (cloth == null) continue;
+                    try
+                    {
+                        cloth.enabled = true;
+                        var mc2 = cloth.TryCast<MagicaCloth2.MagicaCloth>();
+                        if (mc2 != null)
+                        {
+                            mc2.BuildAndRun();
+                            Plugin.Log.LogInfo($"[CharmPhysics] ✓ Rebuilt game cloth on '{cloth.gameObject.name}' for swapped mesh.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Log.LogWarning($"[CharmPhysics] Cloth rebuild error: {ex.Message}");
                     }
                 }
 
@@ -333,6 +368,15 @@ namespace CharmReplacer
         {
             _pendingClothList.Add(cloth);
             _pendingClothDelays.Add(3);
+        }
+
+        // Re-enable + BuildAndRun the game's MagicaCloth N frames after a mesh-only charm swap,
+        // so it rebuilds against the swapped mesh (physics on first load, not only after restart).
+        public void ScheduleClothRebuild(MonoBehaviour cloth, int frames)
+        {
+            if (cloth == null) return;
+            _pendingClothRebuild.Add(cloth);
+            _pendingClothRebuildDelays.Add(frames);
         }
 
         public void ScheduleRendererReenable(Renderer renderer, int frames = 10)
