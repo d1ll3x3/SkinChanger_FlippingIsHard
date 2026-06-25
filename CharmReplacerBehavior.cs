@@ -146,12 +146,15 @@ namespace CharmReplacer
                     if (cloth == null) continue;
                     try
                     {
+                        // Re-activate the whole GameObject (it was toggled off at swap time) so
+                        // MagicaCloth2 re-initialises from scratch against the NEW mesh, then build.
+                        cloth.gameObject.SetActive(true);
                         cloth.enabled = true;
                         var mc2 = cloth.TryCast<MagicaCloth2.MagicaCloth>();
                         if (mc2 != null)
                         {
                             mc2.BuildAndRun();
-                            Plugin.Log.LogInfo($"[CharmPhysics] ✓ Rebuilt game cloth on '{cloth.gameObject.name}' for swapped mesh.");
+                            Plugin.Log.LogInfo($"[CharmPhysics] ✓ Re-enabled charm GO + BuildAndRun on '{cloth.gameObject.name}' (success = no '[MC2] Already built' above).");
                         }
                     }
                     catch (Exception ex)
@@ -333,15 +336,17 @@ namespace CharmReplacer
                 CharmState.LocalCharmApplied = false;
                 _charmRetries = 5;
                 _charmRetryTimer = 0f;
-                // New game: players are about to appear; force a fresh manifest so a skin
-                // changed in the DB since boot is picked up promptly (not up to 60s later).
-                try { RemoteSkinService.RequestManifestRefresh(); } catch { }
+                // No manifest refresh / download here: all remote assets were already prefetched at
+                // the main menu (RequestMenuSync), so gameplay does no network work.
             }
 
             // Sync paint attempt for hot scene transitions where the renderer is
             // already in scene. Falls through to the per-frame poll otherwise.
             if (isMainMenu)
             {
+                // Do all remote downloads here (in the menu): refresh the manifest and prefetch any
+                // changed/missing assets, so a match never triggers network work.
+                try { RemoteSkinService.RequestMenuSync(); } catch { }
                 try { SkinSystem.TryApplySkinToMainMenuPhonePreview(); } catch { }
                 _menuFastPollFrames = FastPollBudgetFrames;
             }

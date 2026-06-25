@@ -549,6 +549,13 @@ namespace CharmReplacer
 
         // --- Apply charm to a single remote player (mesh-swap path) ---
 
+        // Rate-limit re-applying after the game reverts our swapped mesh (its charm network
+        // re-sync), so we don't get into a tight fight loop with the game.
+        private static readonly Dictionary<int, float> _lastReswap = new Dictionary<int, float>();
+        private const float ReswapCooldown = 2f;
+        // Log the "mesh-only = no reliable physics" hint once per charm root.
+        private static readonly HashSet<int> _meshOnlyHintLogged = new HashSet<int>();
+
         private static void ApplyCharmToPlayer(GameObject playerGO, Mesh targetMesh, Il2CppReferenceArray<Material> targetMaterials)
         {
             var filters = playerGO.GetComponentsInChildren<MeshFilter>(true);
@@ -567,14 +574,25 @@ namespace CharmReplacer
                     if (!mf.gameObject.activeSelf) continue;
 
                     int instanceId = mf.GetInstanceID();
-                    if (CharmState.CharmedMeshFilterIds.Contains(instanceId)) continue;
-                    if (mf.sharedMesh == targetMesh) continue;
+                    if (mf.sharedMesh == targetMesh) continue; // already our mesh — nothing to do
 
                     string meshName = "";
                     try { meshName = mf.sharedMesh.name ?? ""; } catch { }
-                    if (meshName.StartsWith("CustomGorraMesh")) continue;
+                    if (meshName.StartsWith("CustomGorraMesh")) continue; // already a custom charm mesh
 
                     if (!IsCharmTarget(mf.gameObject)) continue;
+
+                    // If we already swapped this slot but the mesh is no longer ours, the game
+                    // re-applied its original charm (ChangeCharmClient network re-sync). Re-apply
+                    // ours instead of leaving the original — but rate-limit so we never get into a
+                    // tight fight loop with the game.
+                    if (CharmState.CharmedMeshFilterIds.Contains(instanceId))
+                    {
+                        if (_lastReswap.TryGetValue(instanceId, out float t) && Time.time - t < ReswapCooldown)
+                            continue;
+                        _lastReswap[instanceId] = Time.time;
+                        Plugin.Log.LogWarning($"[Charm] Game reverted charm on '{mf.gameObject.name}'; re-applying custom mesh.");
+                    }
 
                     var mr = mf.GetComponent<MeshRenderer>();
 
@@ -943,24 +961,30 @@ namespace CharmReplacer
                     if (!typeName.Contains("MagicaCloth2") && !typeName.Contains("MagicaCloth"))
                         continue;
 
-                    Plugin.Log.LogInfo($"[CharmPhysics] Found {typeName} on '{mb.gameObject.name}'");
-
                     // This is the game's OWN MagicaCloth on the original charm slot. A mesh-only
-                    // charm reuses it: we swap the mesh and rebuild the cloth so it simulates the
-                    // NEW mesh. The catch is that the game already built this cloth (against the
-                    // original mesh) the moment the phone spawned, so a plain BuildAndRun() is a
-                    // no-op ("[MC2] Already built") and the charm hangs static — EXCEPT after a
-                    // graceful restart, where the cloth respawns fresh (unbuilt) and BuildAndRun
-                    // succeeds (that's why it only worked after a restart). To get it on the first
-                    // load too, force a re-initialise: disable the cloth now, then re-enable +
-                    // BuildAndRun a few frames later so it rebuilds against the swapped mesh.
+                    // charm reuses it: we swap the mesh and BuildAndRun the game's cloth so it
+                    // simulates the NEW mesh. This only succeeds when the cloth is still FRESH
+                    // (unbuilt) — e.g. right after a graceful restart. If the phone has been spawned
+                    // a while (the usual case, and always for late remote downloads) MagicaCloth2
+                    // refuses with "[MC2] Already built" and the charm hangs static. Neither
+                    // disabling the component nor toggling the GameObject makes MC2 release that
+                    // built state (confirmed in-game: both still log "Already built", and toggling
+                    // makes the game re-clone the charm in a loop). So we do NOT fight it: a single
+                    // BuildAndRun gives physics in the fresh case and is a harmless no-op otherwise.
+                    // Reliable first-load physics require the charm to ship its OWN MagicaCloth2
+                    // (the prefab path) — see the hint below.
                     try
                     {
-                        mb.enabled = false;
-                        CharmReplacerBehavior.Instance?.ScheduleClothRebuild(mb, 4);
-                        Plugin.Log.LogInfo($"[CharmPhysics] Scheduled game-cloth rebuild on '{mb.gameObject.name}' (replicating the restart's fresh build).");
+                        var mc2 = mb.TryCast<MagicaCloth2.MagicaCloth>();
+                        if (mc2 != null) mc2.BuildAndRun();
                     }
-                    catch (Exception ex) { Plugin.Log.LogWarning($"[CharmPhysics] Rebuild schedule error: {ex.Message}"); }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[CharmPhysics] BuildAndRun: {ex.Message}"); }
+
+                    if (_meshOnlyHintLogged.Add(root.GetInstanceID()))
+                        Plugin.Log.LogWarning(
+                            "[CharmPhysics] Mesh-only charm: physics only apply when the game's cloth " +
+                            "is fresh (after a restart). For physics on the FIRST load, export the charm " +
+                            "WITH a configured MagicaCloth2 component so it loads via the prefab path.");
 
                     return;
                 }

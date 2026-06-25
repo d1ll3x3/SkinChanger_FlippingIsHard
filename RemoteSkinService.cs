@@ -65,11 +65,15 @@ namespace CharmReplacer
         private static readonly Dictionary<string, float> _retryAfter =
             new Dictionary<string, float>(StringComparer.Ordinal);
 
-        // Periodic manifest refresh so DB changes appear live. Re-fetched on this interval
-        // (and right after a scene/game load); only a changed manifest body does any work.
+        // Manifest is refreshed only when requested (entering the main menu), never on a timer
+        // during gameplay — so no network happens mid-match. _nextManifestRefetch is set to 0 to
+        // fire once, then parked at MaxValue until the next menu request.
         private static float _nextManifestRefetch = 0f;
-        private const float ManifestRefetchSeconds = 60f;
         private static string _lastManifestText = null;
+
+        // When true, a full menu prefetch runs as soon as the manifest is ready (set at boot and
+        // every time we enter the main menu).
+        private static bool _syncRequested = true;
 
         // --- Download queue ---
         private struct Pending
@@ -122,6 +126,13 @@ namespace CharmReplacer
             if (!Enabled) return;
             TickManifest();
             MaybeRefetchManifest();
+            // Menu prefetch: download everything that changed once the manifest is ready and no
+            // fetch is in flight. Runs at boot and on each main-menu entry.
+            if (_manifestReady && !_manifestFailed && _syncRequested && _manifestTask == null)
+            {
+                _syncRequested = false;
+                SyncAllFromManifest();
+            }
             if (_manifestReady && !_manifestFailed && Time.time >= _nextScanTime)
             {
                 _nextScanTime = Time.time + ScanIntervalSeconds;
@@ -130,12 +141,12 @@ namespace CharmReplacer
             TickDownloads();
         }
 
-        /// <summary>Periodically re-fetches the manifest so skins changed in the DB appear live.</summary>
+        /// <summary>Re-fetches the manifest when requested (entering the menu); never on a timer.</summary>
         private static void MaybeRefetchManifest()
         {
             if (!_manifestReady || _manifestTask != null) return; // initial fetch / one in flight
             if (Time.time < _nextManifestRefetch) return;
-            _nextManifestRefetch = Time.time + ManifestRefetchSeconds;
+            _nextManifestRefetch = float.MaxValue; // park until the next explicit menu request
             try
             {
                 // Cache-bust so Fastly is more likely to serve the fresh manifest; the per-asset
@@ -149,8 +160,18 @@ namespace CharmReplacer
             }
         }
 
-        /// <summary>Forces a manifest refresh soon (called on scene/game load).</summary>
+        /// <summary>Forces a manifest refresh soon (used internally by the menu sync).</summary>
         public static void RequestManifestRefresh() => _nextManifestRefetch = 0f;
+
+        /// <summary>
+        /// Called when entering the main menu: refresh the manifest and re-run the full prefetch,
+        /// so any DB change is pulled here (in the menu) and never mid-match.
+        /// </summary>
+        public static void RequestMenuSync()
+        {
+            _syncRequested = true;
+            _nextManifestRefetch = 0f;
+        }
 
         /// <summary>
         /// Discovers remote players and triggers downloads. Independent of the painting
@@ -162,24 +183,16 @@ namespace CharmReplacer
         {
             try
             {
+                // Remote players' assets are prefetched at the menu (SyncAllFromManifest) and already
+                // sit in CharmState's dicts, so we do NOT start any network download in-match. The
+                // only thing handled here is the LOCAL player's own assets, which need the in-game
+                // nickname to resolve; it's hash-gated, so after the first session it's a no-op.
                 var local = PlayerIdentity.GetLocalPlayerGO();
-
-                // Pull the local player's OWN assets from the backend into the plugin root, so a
-                // user who uploaded their skin sees themselves without copying files. Re-checked
-                // every scan (cheap; gated by hash) so a DB change refreshes the local skin live.
                 if (local != null)
                 {
                     string localNick = PlayerIdentity.GetPlayerNickname(local);
                     if (!string.IsNullOrEmpty(localNick))
                         EnsureOwnAssets(localNick, PlayerIdentity.GetPlayerSteamId(local));
-                }
-
-                foreach (var p in PlayerIdentity.GetAllPlayers())
-                {
-                    if (p == null || p == local) continue;
-                    string nick = PlayerIdentity.GetPlayerNickname(p);
-                    if (string.IsNullOrEmpty(nick)) continue;
-                    EnsureDownloaded(nick, PlayerIdentity.GetPlayerSteamId(p));
                 }
             }
             catch (Exception ex)
@@ -268,7 +281,8 @@ namespace CharmReplacer
                     _lastManifestText = text;
                     ParseManifest(text);
                     _manifestReady = true;
-                    _nextManifestRefetch = Time.time + ManifestRefetchSeconds;
+                    // Park until the next explicit menu request — no periodic in-match refetch.
+                    _nextManifestRefetch = float.MaxValue;
                     // Only log on a real change (the periodic re-fetch is otherwise silent).
                     // A changed manifest carries new hashes; the per-player hash tracking in
                     // EnsureDownloaded re-downloads + repaints the affected entries automatically.
@@ -337,13 +351,34 @@ namespace CharmReplacer
             if (entry == null) _byName.TryGetValue(nick.Trim().ToLowerInvariant(), out entry);
             if (entry == null) return;
 
-            // The asset URL and the on-disk cache file are keyed by the uploader's SteamID64
-            // (from the manifest): always present, stable, and filesystem-safe — names with
-            // symbols / non-Latin characters would otherwise make File.WriteAllBytes throw and
-            // the asset would never load for OTHER players. The in-memory dictionary key stays
-            // the nickname (synced across machines), so the matching logic is unchanged.
-            // No ContainsKey guard here: per-(nick,kind,hash) tracking in EnqueueIfStale both
-            // dedupes and lets a changed manifest hash re-download live.
+            EnqueueEntry(entry, nick);
+        }
+
+        /// <summary>
+        /// Menu-time prefetch: walks every manifest entry and, for each asset, runs the existing
+        /// hash gate so ONLY changed/missing assets download. Populates CharmState's dicts so
+        /// in-match painting needs zero network. Called at boot and on every main-menu entry.
+        /// </summary>
+        public static void SyncAllFromManifest()
+        {
+            if (!Enabled || !_manifestReady || _manifestFailed) return;
+            int n = 0;
+            foreach (var kv in _byName)
+            {
+                EnqueueEntry(kv.Value, kv.Value.Name);
+                n++;
+            }
+            Plugin.Log.LogInfo($"[Remote] Menu sync: checked {n} manifest entries (downloads only the changed ones).");
+        }
+
+        /// <summary>
+        /// Enqueues hash-gated downloads for one manifest entry (skin/emission/charm). The asset URL
+        /// and cache file are keyed by the uploader's SteamID64 (always present, stable, filesystem
+        /// -safe); the in-memory dict key stays the nickname (synced across machines). EnqueueIfStale
+        /// dedupes by (nick,kind,hash) and lets a changed manifest hash re-download.
+        /// </summary>
+        private static void EnqueueEntry(Entry entry, string nick)
+        {
             string fileKey = SafeFileKey(entry, nick);
             string baseUrl = BaseUrl.TrimEnd('/');
             string skinsDir = Path.Combine(Plugin.PluginDirectory, "Skins");
