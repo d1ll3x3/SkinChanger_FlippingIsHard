@@ -188,7 +188,9 @@ namespace CharmReplacer
                                 var getter = prop.GetGetMethod();
                                 var res = getter?.Invoke(netObj, null);
                                 string id = TryExtractId(res);
-                                if (!string.IsNullOrEmpty(id)) { result = id; break; }
+                                // Only accept a real SteamID64 — never a FishNet ClientId/OwnerId
+                                // (small ints), which would build a bad /asset/<id>/ URL (404).
+                                if (IsValidSteamId64(id)) { result = id; break; }
                             }
                             catch { }
                         }
@@ -200,7 +202,7 @@ namespace CharmReplacer
                             {
                                 var val = field.GetValue(netObj);
                                 string id = TryExtractId(val);
-                                if (!string.IsNullOrEmpty(id)) { result = id; break; }
+                                if (IsValidSteamId64(id)) { result = id; break; }
                             }
                             catch { }
                         }
@@ -212,8 +214,24 @@ namespace CharmReplacer
                 Plugin.Log.LogDebug($"[PlayerIdentity] GetPlayerSteamId error: {ex.Message}");
             }
 
+            // Diagnostic (once per player instance): tells us from the logs whether the game
+            // actually exposes a real SteamID64 on PlayerNetworked, or if we fall back to name.
+            if (_loggedSteamIds.Add(instanceId))
+                Plugin.Log.LogInfo($"[PlayerIdentity] Resolved SteamID: {(string.IsNullOrEmpty(result) ? "<none — using name>" : result)}");
+
             _steamIdCache[instanceId] = result;
             return result;
+        }
+
+        private static readonly HashSet<int> _loggedSteamIds = new HashSet<int>();
+
+        /// <summary>A valid SteamID64 is 17 digits in the public-account range (starts 7656119…).</summary>
+        public static bool IsValidSteamId64(string s)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length != 17) return false;
+            for (int i = 0; i < s.Length; i++)
+                if (s[i] < '0' || s[i] > '9') return false;
+            return s.StartsWith("7656");
         }
 
         /// <summary>
@@ -402,21 +420,18 @@ namespace CharmReplacer
                     if (IsLocalPlayer(p)) { result = p; break; }
                 }
 
-                // Fallback for lobby: Distance to Camera.main
-                if (result == null && Camera.main != null && allPlayers.Count > 0)
+                // Fallback (lobby / single-player ONLY): nearest player to Camera.main.
+                // CRITICAL: only when there is exactly ONE player — otherwise, in multiplayer
+                // before the network owner resolves, this picks the nearest REMOTE player as
+                // "local", which makes the local charm get applied to the wrong player (and,
+                // via the charm slot being marked, blocks the remote player's own physics).
+                // With more than one player we return null and let the caller retry until
+                // IsOwner resolves.
+                if (result == null && allPlayers.Count == 1 && Camera.main != null)
                 {
-                    GameObject best = null;
-                    float bestDist = float.MaxValue;
-                    var camPos = Camera.main.transform.position;
-
-                    foreach (var p in allPlayers)
-                    {
-                        if (p == null) continue;
-                        float d = Vector3.Distance(p.transform.position, camPos);
-                        if (d < bestDist) { bestDist = d; best = p; }
-                    }
-
-                    if (best != null && bestDist <= 10f) result = best;
+                    var p = allPlayers[0];
+                    if (p != null && Vector3.Distance(p.transform.position, Camera.main.transform.position) <= 10f)
+                        result = p;
                 }
             }
             catch { }

@@ -53,13 +53,23 @@ namespace CharmReplacer
         private static bool _manifestFailed = false;
         private static Task<string> _manifestTask;
 
-        // Players already processed this session (avoids re-enqueuing every scan tick).
-        private static readonly HashSet<string> _resolved =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Last applied content hash per "key|kind" (key = in-memory asset key = nick, or
+        // "__own__" for the local player's own assets). Drives LIVE refresh: when a periodic
+        // manifest re-fetch yields a new hash, the mismatch re-triggers a download + repaint
+        // without restarting the game.
+        private static readonly Dictionary<string, string> _appliedHash =
+            new Dictionary<string, string>(StringComparer.Ordinal);
 
-        // The local player's own assets are pulled once per session (set after the first
-        // attempt with a resolvable local nickname).
-        private static bool _ownChecked = false;
+        // Per-URL cooldown after a failed or hash-mismatched (stale CDN) download, so we don't
+        // hammer the CDN while it catches up.
+        private static readonly Dictionary<string, float> _retryAfter =
+            new Dictionary<string, float>(StringComparer.Ordinal);
+
+        // Periodic manifest refresh so DB changes appear live. Re-fetched on this interval
+        // (and right after a scene/game load); only a changed manifest body does any work.
+        private static float _nextManifestRefetch = 0f;
+        private const float ManifestRefetchSeconds = 60f;
+        private static string _lastManifestText = null;
 
         // --- Download queue ---
         private struct Pending
@@ -111,6 +121,7 @@ namespace CharmReplacer
         {
             if (!Enabled) return;
             TickManifest();
+            MaybeRefetchManifest();
             if (_manifestReady && !_manifestFailed && Time.time >= _nextScanTime)
             {
                 _nextScanTime = Time.time + ScanIntervalSeconds;
@@ -118,6 +129,28 @@ namespace CharmReplacer
             }
             TickDownloads();
         }
+
+        /// <summary>Periodically re-fetches the manifest so skins changed in the DB appear live.</summary>
+        private static void MaybeRefetchManifest()
+        {
+            if (!_manifestReady || _manifestTask != null) return; // initial fetch / one in flight
+            if (Time.time < _nextManifestRefetch) return;
+            _nextManifestRefetch = Time.time + ManifestRefetchSeconds;
+            try
+            {
+                // Cache-bust so Fastly is more likely to serve the fresh manifest; the per-asset
+                // hash verification in DownloadToFileAsync is the real correctness guarantee.
+                string url = BaseUrl.TrimEnd('/') + "/api/manifest.tsv?t=" + DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                _manifestTask = _http.GetStringAsync(url);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogDebug($"[Remote] Manifest refetch start error: {ex.Message}");
+            }
+        }
+
+        /// <summary>Forces a manifest refresh soon (called on scene/game load).</summary>
+        public static void RequestManifestRefresh() => _nextManifestRefetch = 0f;
 
         /// <summary>
         /// Discovers remote players and triggers downloads. Independent of the painting
@@ -131,9 +164,10 @@ namespace CharmReplacer
             {
                 var local = PlayerIdentity.GetLocalPlayerGO();
 
-                // Pull the local player's OWN assets from the backend (once) into the plugin
-                // root, so a user who uploaded their skin sees themselves without copying files.
-                if (!_ownChecked && local != null)
+                // Pull the local player's OWN assets from the backend into the plugin root, so a
+                // user who uploaded their skin sees themselves without copying files. Re-checked
+                // every scan (cheap; gated by hash) so a DB change refreshes the local skin live.
+                if (local != null)
                 {
                     string localNick = PlayerIdentity.GetPlayerNickname(local);
                     if (!string.IsNullOrEmpty(localNick))
@@ -163,27 +197,23 @@ namespace CharmReplacer
         private static void EnsureOwnAssets(string nick, string steamId)
         {
             Entry entry = null;
-            if (!string.IsNullOrEmpty(steamId)) _bySteamId.TryGetValue(steamId, out entry);
+            if (PlayerIdentity.IsValidSteamId64(steamId)) _bySteamId.TryGetValue(steamId, out entry);
             if (entry == null) _byName.TryGetValue(nick.Trim().ToLowerInvariant(), out entry);
-
-            _ownChecked = true; // processed: don't retry every tick
-
             if (entry == null) return;
 
-            string urlKey = !string.IsNullOrEmpty(steamId) ? steamId : entry.SteamId;
             string baseUrl = BaseUrl.TrimEnd('/');
             string dir = Plugin.PluginDirectory;
 
             if (entry.SkinHash != null)
-                EnqueueOwnIfStale($"{baseUrl}/asset/{Uri.EscapeDataString(urlKey)}/skin",
+                EnqueueOwnIfStale(AssetUrl(baseUrl, entry.SteamId, "skin", entry.SkinHash),
                     Path.Combine(dir, "Skin.png"), "skin", nick, entry.SkinHash);
 
             if (entry.EmissionHash != null)
-                EnqueueOwnIfStale($"{baseUrl}/asset/{Uri.EscapeDataString(urlKey)}/emission",
+                EnqueueOwnIfStale(AssetUrl(baseUrl, entry.SteamId, "emission", entry.EmissionHash),
                     Path.Combine(dir, "Skin_Emission.png"), "emission", nick, entry.EmissionHash);
 
             if (entry.CharmHash != null)
-                EnqueueOwnIfStale($"{baseUrl}/asset/{Uri.EscapeDataString(urlKey)}/charm",
+                EnqueueOwnIfStale(AssetUrl(baseUrl, entry.SteamId, "charm", entry.CharmHash),
                     Path.Combine(dir, "hatbundle"), "charm", nick, entry.CharmHash);
         }
 
@@ -193,7 +223,10 @@ namespace CharmReplacer
         /// </summary>
         private static void EnqueueOwnIfStale(string url, string destPath, string kind, string nick, string hash)
         {
+            string applyKey = "__own__|" + kind;
+            if (_appliedHash.TryGetValue(applyKey, out var applied) && applied == hash) return;
             if (_enqueued.Contains(url)) return;
+            if (_retryAfter.TryGetValue(url, out var until) && Time.time < until) return;
 
             if (File.Exists(destPath))
             {
@@ -206,6 +239,7 @@ namespace CharmReplacer
                 if (sidecar == hash)
                 {
                     // Already cached and current; the boot loader already applied it.
+                    _appliedHash[applyKey] = hash;
                     return;
                 }
             }
@@ -229,9 +263,17 @@ namespace CharmReplacer
                 }
                 else
                 {
-                    ParseManifest(_manifestTask.Result);
+                    string text = _manifestTask.Result;
+                    bool changed = text != _lastManifestText;
+                    _lastManifestText = text;
+                    ParseManifest(text);
                     _manifestReady = true;
-                    Plugin.Log.LogInfo($"[Remote] Manifest ready: {_bySteamId.Count} by SteamID, {_byName.Count} by name.");
+                    _nextManifestRefetch = Time.time + ManifestRefetchSeconds;
+                    // Only log on a real change (the periodic re-fetch is otherwise silent).
+                    // A changed manifest carries new hashes; the per-player hash tracking in
+                    // EnsureDownloaded re-downloads + repaints the affected entries automatically.
+                    if (changed)
+                        Plugin.Log.LogInfo($"[Remote] Manifest ready: {_bySteamId.Count} by SteamID, {_byName.Count} by name.");
                 }
             }
             catch (Exception ex)
@@ -288,57 +330,75 @@ namespace CharmReplacer
         {
             if (!Enabled || !_manifestReady || _manifestFailed) return;
             if (string.IsNullOrEmpty(nick)) return;
-            if (_resolved.Contains(nick)) return;
 
-            // Resolve the entry: Steam ID takes priority, then normalized name.
+            // Resolve the entry: a valid SteamID64 takes priority, then normalized name.
             Entry entry = null;
-            if (!string.IsNullOrEmpty(steamId)) _bySteamId.TryGetValue(steamId, out entry);
+            if (PlayerIdentity.IsValidSteamId64(steamId)) _bySteamId.TryGetValue(steamId, out entry);
             if (entry == null) _byName.TryGetValue(nick.Trim().ToLowerInvariant(), out entry);
-
-            _resolved.Add(nick); // processed: don't retry every tick
-
             if (entry == null) return;
 
-            // URL key: prefer the (stable) Steam ID when we have it.
-            string urlKey = !string.IsNullOrEmpty(steamId) ? steamId : entry.SteamId;
+            // The asset URL and the on-disk cache file are keyed by the uploader's SteamID64
+            // (from the manifest): always present, stable, and filesystem-safe — names with
+            // symbols / non-Latin characters would otherwise make File.WriteAllBytes throw and
+            // the asset would never load for OTHER players. The in-memory dictionary key stays
+            // the nickname (synced across machines), so the matching logic is unchanged.
+            // No ContainsKey guard here: per-(nick,kind,hash) tracking in EnqueueIfStale both
+            // dedupes and lets a changed manifest hash re-download live.
+            string fileKey = SafeFileKey(entry, nick);
             string baseUrl = BaseUrl.TrimEnd('/');
-
             string skinsDir = Path.Combine(Plugin.PluginDirectory, "Skins");
             string charmsDir = Path.Combine(Plugin.PluginDirectory, "Charms");
 
-            if (entry.SkinHash != null &&
-                !CharmState.PlayerBaseTextures.ContainsKey(nick))
-            {
-                EnqueueIfStale($"{baseUrl}/asset/{Uri.EscapeDataString(urlKey)}/skin",
-                    Path.Combine(skinsDir, nick + ".png"), "skin", nick, entry.SkinHash);
-            }
+            if (entry.SkinHash != null)
+                EnqueueIfStale(AssetUrl(baseUrl, entry.SteamId, "skin", entry.SkinHash),
+                    Path.Combine(skinsDir, fileKey + ".png"), "skin", nick, entry.SkinHash);
 
-            if (entry.EmissionHash != null &&
-                !CharmState.PlayerEmissionTextures.ContainsKey(nick))
-            {
-                EnqueueIfStale($"{baseUrl}/asset/{Uri.EscapeDataString(urlKey)}/emission",
-                    Path.Combine(skinsDir, nick + "_emission.png"), "emission", nick, entry.EmissionHash);
-            }
+            if (entry.EmissionHash != null)
+                EnqueueIfStale(AssetUrl(baseUrl, entry.SteamId, "emission", entry.EmissionHash),
+                    Path.Combine(skinsDir, fileKey + "_emission.png"), "emission", nick, entry.EmissionHash);
 
-            if (entry.CharmHash != null &&
-                !CharmState.PlayerCharmMeshes.ContainsKey(nick) &&
-                !CharmState.PlayerCharmPrefabs.ContainsKey(nick))
-            {
-                EnqueueIfStale($"{baseUrl}/asset/{Uri.EscapeDataString(urlKey)}/charm",
-                    Path.Combine(charmsDir, nick + ".hatbundle"), "charm", nick, entry.CharmHash);
-            }
+            if (entry.CharmHash != null)
+                EnqueueIfStale(AssetUrl(baseUrl, entry.SteamId, "charm", entry.CharmHash),
+                    Path.Combine(charmsDir, fileKey + ".hatbundle"), "charm", nick, entry.CharmHash);
         }
 
-        /// <summary>Enqueues if the file is missing or its cached hash does not match.</summary>
+        /// <summary>Asset download URL, keyed by SteamID64 and cache-busted by content hash.</summary>
+        private static string AssetUrl(string baseUrl, string steamId, string kind, string hash) =>
+            $"{baseUrl}/asset/{Uri.EscapeDataString(steamId)}/{kind}?v={hash}";
+
+        /// <summary>Filesystem-safe cache file key: the SteamID64 (digits) when present, else a sanitized name.</summary>
+        private static string SafeFileKey(Entry entry, string nick) =>
+            !string.IsNullOrEmpty(entry.SteamId) ? entry.SteamId : Sanitize(nick);
+
+        /// <summary>Replaces characters illegal in a Windows filename so the cache write can't fail.</summary>
+        private static string Sanitize(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "unknown";
+            var invalid = Path.GetInvalidFileNameChars();
+            var sb = new System.Text.StringBuilder(s.Length);
+            foreach (char c in s) sb.Append(Array.IndexOf(invalid, c) >= 0 ? '_' : c);
+            string r = sb.ToString().Trim().TrimEnd('.', ' ');
+            return r.Length == 0 ? "unknown" : r;
+        }
+
+        /// <summary>
+        /// Enqueues a download unless the asset is already current. "Current" = the same hash was
+        /// already applied this session, or a cached file with a matching .hash sidecar exists
+        /// (loaded from disk here). A changed manifest hash falls through to a fresh download.
+        /// </summary>
         private static void EnqueueIfStale(string url, string destPath, string kind, string nick, string hash)
         {
+            string applyKey = nick + "|" + kind;
+            if (_appliedHash.TryGetValue(applyKey, out var applied) && applied == hash) return;
             if (_enqueued.Contains(url)) return;
+            if (_retryAfter.TryGetValue(url, out var until) && Time.time < until) return;
 
             // Cache: if the file exists and the .hash sidecar matches, reuse it.
             if (File.Exists(destPath) && ReadHashSidecar(destPath) == hash)
             {
                 Plugin.Log.LogDebug($"[Remote] Cache hit '{nick}' ({kind}); loading from disk.");
                 ApplyToState(destPath, kind, nick, own: false);
+                _appliedHash[applyKey] = hash;
                 return;
             }
 
@@ -361,11 +421,15 @@ namespace CharmReplacer
                         WriteHashSidecar(_active.DestPath, _active.Hash);
                         Plugin.Log.LogInfo($"[Remote] ✓ Downloaded '{_active.Nick}' ({_active.Kind}).");
                         ApplyToState(_active.DestPath, _active.Kind, _active.Nick, _active.Own);
+                        string applyKey = (_active.Own ? "__own__" : _active.Nick) + "|" + _active.Kind;
+                        _appliedHash[applyKey] = _active.Hash;
                     }
                     else
                     {
-                        Plugin.Log.LogWarning($"[Remote] Download failed '{_active.Nick}' ({_active.Kind}): " +
-                            $"{_activeTask.Exception?.GetBaseException().Message}");
+                        // Network error or hash mismatch (stale CDN). Cooldown, then a later poll
+                        // retries — self-healing once the CDN serves the bytes matching the hash.
+                        _retryAfter[_active.Url] = Time.time + 20f;
+                        Plugin.Log.LogWarning($"[Remote] Download failed/stale '{_active.Nick}' ({_active.Kind}); will retry.");
                     }
                 }
                 catch (Exception ex)
@@ -374,6 +438,9 @@ namespace CharmReplacer
                 }
                 finally
                 {
+                    // Always drop the in-flight marker: on success the hash gate prevents re-enqueue,
+                    // on failure the cooldown does, and a later manifest change re-enqueues a new URL.
+                    _enqueued.Remove(_active.Url);
                     _activeTask = null;
                 }
                 return;
@@ -382,16 +449,29 @@ namespace CharmReplacer
             if (_queue.Count == 0) return;
 
             _active = _queue.Dequeue();
-            _activeTask = DownloadToFileAsync(_active.Url, _active.DestPath);
+            _activeTask = DownloadToFileAsync(_active.Url, _active.DestPath, _active.Hash);
         }
 
-        /// <summary>Downloads (thread pool) to a managed byte[] and writes to disk. true on success.</summary>
-        private static async Task<bool> DownloadToFileAsync(string url, string destPath)
+        /// <summary>
+        /// Downloads (thread pool) to a managed byte[], verifies its SHA-256 against the expected
+        /// manifest hash, and writes to disk. Returns false on a network error OR a hash mismatch
+        /// (stale CDN) — in which case nothing is written, so a stale asset is never cached.
+        /// </summary>
+        private static async Task<bool> DownloadToFileAsync(string url, string destPath, string expectedHash)
         {
             try
             {
                 byte[] data = await _http.GetByteArrayAsync(url).ConfigureAwait(false);
                 if (data == null || data.Length == 0) return false;
+                if (!string.IsNullOrEmpty(expectedHash))
+                {
+                    string actual = Sha256Hex(data);
+                    if (!string.Equals(actual, expectedHash, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Plugin.Log.LogWarning($"[Remote] Hash mismatch for {url} (stale CDN?); not caching.");
+                        return false;
+                    }
+                }
                 Directory.CreateDirectory(Path.GetDirectoryName(destPath));
                 File.WriteAllBytes(destPath, data);
                 return true;
@@ -401,6 +481,15 @@ namespace CharmReplacer
                 Plugin.Log.LogWarning($"[Remote] Download error {url}: {ex.Message}");
                 return false;
             }
+        }
+
+        private static string Sha256Hex(byte[] data)
+        {
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            var hash = sha.ComputeHash(data);
+            var sb = new System.Text.StringBuilder(hash.Length * 2);
+            foreach (var b in hash) sb.Append(b.ToString("x2"));
+            return sb.ToString();
         }
 
         /// <summary>Applies a freshly downloaded/cached asset to the mod state live.</summary>
@@ -414,12 +503,21 @@ namespace CharmReplacer
                     if (kind == "skin")
                     {
                         var tex = SkinLoader.LoadTextureFromFile(path, "CustomPlayerSkin");
-                        if (tex != null) CharmState.CustomSkinTexture = tex;
+                        if (tex != null)
+                        {
+                            CharmState.CustomSkinTexture = tex;
+                            // Repaint so a DB change to your own skin appears without a restart.
+                            CharmReplacerBehavior.Instance?.RequestGameFastPoll();
+                        }
                     }
                     else if (kind == "emission")
                     {
                         var tex = SkinLoader.LoadTextureFromFile(path, "CustomPlayerSkinEmission");
-                        if (tex != null) CharmState.CustomSkinEmissionTexture = tex;
+                        if (tex != null)
+                        {
+                            CharmState.CustomSkinEmissionTexture = tex;
+                            CharmReplacerBehavior.Instance?.RequestGameFastPoll();
+                        }
                     }
                     else if (kind == "charm")
                     {

@@ -95,6 +95,12 @@ namespace CharmReplacer
                     string fileName = Path.GetFileNameWithoutExtension(file);
                     if (fileName.EndsWith("_emission", StringComparison.OrdinalIgnoreCase)) continue;
 
+                    // Remote-cached files (have a .hash sidecar) are named by SteamID and are
+                    // applied under the correct nick by RemoteSkinService when the player
+                    // appears. Loading them here would key them by the SteamID filename and
+                    // never match a player. Only hand-placed files are loaded at boot.
+                    if (File.Exists(file + ".hash")) continue;
+
                     var tex = LoadTextureFromFile(file, $"skin_{fileName}");
                     if (tex != null)
                     {

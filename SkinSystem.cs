@@ -362,8 +362,15 @@ namespace CharmReplacer
                             if (mat == null) continue;
                             if (!IsMaterialPhoneDefault(mat)) continue;
 
+                            // Repaint when EITHER the base texture or the emission map is not yet
+                            // applied. Checking only the base would skip a material whose base is
+                            // already correct but whose emission arrived later (remote assets come
+                            // in sequentially: base first, emission a moment after) — that was the
+                            // "others' emission only after restart" bug.
                             var currentTex = mat.HasProperty("_MainTex") ? mat.GetTexture("_MainTex") : null;
-                            if (currentTex == targetTex) continue;
+                            bool baseOk = currentTex == targetTex;
+                            bool emissionOk = targetEmission == null || EmissionApplied(mat, targetEmission);
+                            if (baseOk && emissionOk) continue;
 
                             var clonedMat = UnityEngine.Object.Instantiate(mat);
                             if (clonedMat == null) continue;

@@ -125,6 +125,7 @@ namespace CharmReplacer
                     }
                 }
 
+
                 if (CharmState.CustomMesh == null && CharmState.CustomPrefab == null
                     && CharmState.PlayerCharmMeshes.Count == 0 && CharmState.PlayerCharmPrefabs.Count == 0
                     && CharmState.CustomSkinTexture == null && CharmState.PlayerBaseTextures.Count == 0) return;
@@ -297,6 +298,9 @@ namespace CharmReplacer
                 CharmState.LocalCharmApplied = false;
                 _charmRetries = 5;
                 _charmRetryTimer = 0f;
+                // New game: players are about to appear; force a fresh manifest so a skin
+                // changed in the DB since boot is picked up promptly (not up to 60s later).
+                try { RemoteSkinService.RequestManifestRefresh(); } catch { }
             }
 
             // Sync paint attempt for hot scene transitions where the renderer is
