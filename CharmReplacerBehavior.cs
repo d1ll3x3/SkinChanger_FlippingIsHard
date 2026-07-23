@@ -19,7 +19,6 @@ namespace CharmReplacer
         // target renderer within ~16ms of it spawning instead of waiting for the
         // scheduled scan. Auto-stops on first paint or when stable-empty for a
         // few frames (cosmetic change with nothing to paint).
-        private int _menuFastPollFrames = 0;
         private int _gameFastPollFrames = 0;
         private int _gameFastPollStableEmpty = 0;
         private const int FastPollBudgetFrames = 180;
@@ -42,6 +41,19 @@ namespace CharmReplacer
         // Renderer re-enable after BuildAndRun (hide during async rebuild)
         private Renderer _pendingRendererReenable = null;
         private int _rendererReenableDelay = 0;
+
+        // Skin retry: the phone visual is an async-loaded prefab (NetworkPlayer(Clone)/PlayerVisual)
+        // that appears seconds-to-tens-of-seconds after scene entry — long after the fast poll gives
+        // up. Retry the skin scan at low frequency while in gameplay (v1.7 game scenes are GUID-named,
+        // so we key off "not the main menu" rather than an unreliable scene-name match). Already-painted
+        // renderers are skipped, so this is cheap and also self-heals if the game reverts our material.
+        private float _skinRetryTimer = 0f;
+        private const float SkinRetryInterval = 1.5f;
+
+        // Main-menu phone preview: keep scanning while in the menu so we skin the preview whenever it
+        // appears (loads async, or only shows when the customization screen is opened).
+        private bool _inMainMenu = false;
+        private float _menuRetryTimer = 0f;
 
         public void Awake()
         {
@@ -168,18 +180,15 @@ namespace CharmReplacer
                     && CharmState.PlayerCharmMeshes.Count == 0 && CharmState.PlayerCharmPrefabs.Count == 0
                     && CharmState.CustomSkinTexture == null && CharmState.PlayerBaseTextures.Count == 0) return;
 
-                if (_menuFastPollFrames > 0)
+                // Menu preview: persistent low-frequency scan while in the main menu.
+                if (_inMainMenu && CharmState.CustomSkinTexture != null)
                 {
-                    if (CharmState.CustomSkinTexture != null && CharmState.MenuPreviewRootIds.Count == 0)
+                    _menuRetryTimer += Time.deltaTime;
+                    if (_menuRetryTimer >= 1.0f)
                     {
+                        _menuRetryTimer = 0f;
                         SkinSystem.TryApplySkinToMainMenuPhonePreview();
-                        if (CharmState.MenuPreviewRootIds.Count > 0) _menuFastPollFrames = 0;
                     }
-                    else
-                    {
-                        _menuFastPollFrames = 0;
-                    }
-                    if (_menuFastPollFrames > 0) _menuFastPollFrames--;
                 }
 
                 if (_gameFastPollFrames > 0)
@@ -238,6 +247,21 @@ namespace CharmReplacer
                         _charmRetries--;
                         Plugin.Log.LogDebug($"[Behavior] Charm retry #{5 - _charmRetries}/5");
                         DoScanAndReplace();
+                    }
+                }
+
+                // Skin retry: keep scanning at low frequency while in gameplay until the async phone
+                // visual loads. TryApplySkinToPhoneSourceMaterials skips already-painted renderers, so
+                // re-running is cheap/idempotent, catches remote players whose phone loads late, and
+                // self-heals if the game re-clones/reverts the phone material.
+                bool hasSkinSrc = CharmState.CustomSkinTexture != null || CharmState.PlayerBaseTextures.Count > 0;
+                if (hasSkinSrc && !_inMainMenu && !CharmState.SkinEverPainted)
+                {
+                    _skinRetryTimer += Time.deltaTime;
+                    if (_skinRetryTimer >= SkinRetryInterval)
+                    {
+                        _skinRetryTimer = 0f;
+                        SkinSystem.TryApplySkinToPhoneSourceMaterials();
                     }
                 }
             }
@@ -315,7 +339,14 @@ namespace CharmReplacer
             ScheduleFastScans();
 
             bool isMainMenu = scene.name.Contains("MainMenu");
-            bool isGame = scene.name.Contains("Game");
+            // v1.7 gameplay scenes are GUID/addressable-named (e.g. "b8fc7983...", "Map_NW"), not "Game".
+            // Treat any non-menu, non-bootstrap scene as gameplay.
+            bool isGame = !isMainMenu
+                          && !string.IsNullOrEmpty(scene.name)
+                          && !scene.name.Contains("Bootstrap")
+                          && !scene.name.Contains("Preload")
+                          && !scene.name.Contains("Init");
+            _inMainMenu = isMainMenu;
 
             if (isMainMenu || isGame)
             {
@@ -336,6 +367,7 @@ namespace CharmReplacer
                 CharmState.LocalCharmApplied = false;
                 _charmRetries = 5;
                 _charmRetryTimer = 0f;
+                _skinRetryTimer = 0f;
                 // No manifest refresh / download here: all remote assets were already prefetched at
                 // the main menu (RequestMenuSync), so gameplay does no network work.
             }
@@ -348,7 +380,6 @@ namespace CharmReplacer
                 // changed/missing assets, so a match never triggers network work.
                 try { RemoteSkinService.RequestMenuSync(); } catch { }
                 try { SkinSystem.TryApplySkinToMainMenuPhonePreview(); } catch { }
-                _menuFastPollFrames = FastPollBudgetFrames;
             }
             if (isGame)
             {

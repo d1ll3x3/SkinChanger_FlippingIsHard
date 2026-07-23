@@ -136,23 +136,34 @@ namespace CharmReplacer
             return result;
         }
 
+        // Matches a material name to a default-phone name, tolerating a runtime "(Clone)" / "(Instance)"
+        // or " (1)" suffix (the game clones phone materials at runtime via MaterialHandler2).
+        private static bool MatchesDefaultPhoneName(string matName, string defaultName)
+        {
+            if (matName == defaultName) return true;
+            if (matName.StartsWith(defaultName) &&
+                matName.Length > defaultName.Length &&
+                (matName[defaultName.Length] == ' ' || matName[defaultName.Length] == '(')) return true;
+            return false;
+        }
+
         private static bool IsMaterialPhoneDefaultCore(Material mat)
         {
             if (mat == null) return false;
             string matName = (mat.name ?? string.Empty).ToLowerInvariant();
 
-            // Hard rejects (screens, internals, outlines) come first so they apply
-            // regardless of how we matched the material.
+            // Default phone surface we repaint: ONLY the exterior cover/casing.
+            //   v1.7 rework: M_Skin_Cover_Default (front cover, shader "Elegant Horse Studios/SG_Player_MSAO").
+            //   Legacy (<= 0.12): m_phone_basic_default.
+            // NOT M_Skin_Inside_Default (base/battery = interior, visible when the phone breaks) — it is
+            // deliberately left to fall through to the "inside" hard-reject below.
+            if (MatchesDefaultPhoneName(matName, "m_phone_basic_default")) return true;
+            if (MatchesDefaultPhoneName(matName, "m_skin_cover_default")) return true;
+
+            // Hard rejects (screens, internals, outlines).
             if (matName.Contains("screen") || matName.Contains("display") || matName.Contains("glass")) return false;
             if (matName.Contains("inside")) return false;
             if (matName.Contains("outline")) return false;
-
-            // Default phone material — exact name or with "(Clone)" / "(Instance)" suffix.
-            const string defaultName = "m_phone_basic_default";
-            if (matName == defaultName) return true;
-            if (matName.StartsWith(defaultName) &&
-                matName.Length > defaultName.Length &&
-                (matName[defaultName.Length] == ' ' || matName[defaultName.Length] == '(')) return true;
 
             // Old version (0.9.15): the local player's currently-equipped phone material
             // has no asset name and uses the shader "Elegant Horse Studios/SG_Player_MSAO".
@@ -418,57 +429,19 @@ namespace CharmReplacer
                 Plugin.Log.LogWarning($"[Skin] Error en TryApplySkinToPhoneSourceMaterials: {ex.Message}");
             }
 
-            if (replaced > 0) CharmState.SkinEverPainted = true;
+            if (replaced > 0)
+            {
+                if (!CharmState.SkinEverPainted)
+                    Plugin.Log.LogInfo($"[Skin] ✓ Painted {replaced} phone renderer(s) on first apply.");
+                CharmState.SkinEverPainted = true;
+            }
             return replaced;
-        }
-
-        private static bool IsPhoneModelMatch(string goName, string suffixLower)
-        {
-            if (string.IsNullOrEmpty(goName)) return false;
-            string lower = goName.ToLowerInvariant();
-            if (!lower.StartsWith("sm_phone_v")) return false;
-            int idx = 10;
-            while (idx < lower.Length && char.IsDigit(lower[idx])) idx++;
-            if (idx == 10) return false;
-            if (idx >= lower.Length || lower[idx] != '_') return false;
-            string rest = lower.Substring(idx + 1);
-            return rest.StartsWith(suffixLower);
-        }
-
-        private static bool IsMainMenuPhonePreviewRenderer(GameObject go)
-        {
-            if (go == null) return false;
-
-            if (IsPhoneModelMatch(go.name, "full_outline_lod")) return true;
-
-            Transform parent = go.transform.parent;
-            for (int d = 0; d < 4 && parent != null; d++)
-            {
-                if (IsPhoneModelMatch(parent.gameObject.name, "full_outline_lod"))
-                    return true;
-                parent = parent.parent;
-            }
-            return false;
-        }
-
-        private static Transform GetMainMenuPhonePreviewRoot(Transform start)
-        {
-            if (start == null) return null;
-            Transform current = start;
-            Transform selected = start;
-            for (int d = 0; d < 4 && current != null; d++)
-            {
-                selected = current;
-                current = current.parent;
-            }
-            return selected;
         }
 
         public static int TryApplySkinToMainMenuPhonePreview()
         {
             if (!UnityEngine.SceneManagement.SceneManager.GetActiveScene().name.Contains("MainMenu")) return 0;
             if (CharmState.CustomSkinTexture == null) return 0;
-            if (CharmState.MenuPreviewRootIds.Count > 0) return 0;
 
             int replaced = 0;
             try
@@ -476,125 +449,59 @@ namespace CharmReplacer
                 var renderers = UnityEngine.Object.FindObjectsOfType<Renderer>();
                 if (renderers == null) return 0;
 
-                for (int i = 0; i < renderers.Count; i++)
+                for (int i = 0; i < renderers.Length; i++)
                 {
                     var ren = renderers[i];
                     if (ren == null) continue;
-                    if (!IsMainMenuPhonePreviewRenderer(ren.gameObject)) continue;
 
-                    var previewRoot = GetMainMenuPhonePreviewRoot(ren.transform);
-                    if (previewRoot == null) continue;
+                    int rendererId;
+                    try { rendererId = ren.GetInstanceID(); } catch { continue; }
+                    if (CharmState.MenuPreviewRendererIds.Contains(rendererId)) continue;
 
-                    int rootId;
-                    try { rootId = previewRoot.gameObject.GetInstanceID(); } catch { continue; }
-                    if (CharmState.MenuPreviewRootIds.Contains(rootId)) continue;
+                    var sharedMats = ren.sharedMaterials;
+                    if (sharedMats == null || sharedMats.Length == 0) continue;
 
-                    if (TryApplySkinToMenuPreviewHierarchy(previewRoot))
+                    bool updated = false;
+                    var newMats = new Il2CppReferenceArray<Material>(sharedMats.Length);
+                    for (int m = 0; m < sharedMats.Length; m++)
                     {
-                        CharmState.MenuPreviewRootIds.Add(rootId);
+                        var mat = sharedMats[m];
+                        newMats[m] = mat;
+                        if (mat == null) continue;
+
+                        // Only the exterior phone cover — same specific matcher used in-game. No broad
+                        // heuristic here, so we don't repaint menu backgrounds/reflections.
+                        if (!IsMaterialPhoneDefault(mat)) continue;
+
+                        var currentTex = mat.HasProperty("_MainTex") ? mat.GetTexture("_MainTex") : null;
+                        if (currentTex == CharmState.CustomSkinTexture) continue;
+
+                        var clonedMat = UnityEngine.Object.Instantiate(mat);
+                        if (clonedMat == null) continue;
+                        clonedMat.hideFlags = HideFlags.DontUnloadUnusedAsset;
+                        ApplySkinTexture(clonedMat, CharmState.CustomSkinTexture, CharmState.CustomSkinEmissionTexture);
+                        newMats[m] = clonedMat;
+                        updated = true;
                         replaced++;
                     }
+
+                    if (updated)
+                    {
+                        ren.sharedMaterials = newMats;
+                        CharmState.MenuPreviewRendererIds.Add(rendererId);
+                    }
                 }
+
+                if (replaced > 0)
+                    Plugin.Log.LogInfo($"[Skin] ✓ Menu preview: painted {replaced} phone renderer(s).");
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning($"[Skin] Error applying Skin.png al preview del menu: {ex.Message}");
+                Plugin.Log.LogWarning($"[Skin] Error applying skin al preview del menu: {ex.Message}");
             }
 
             return replaced;
         }
 
-        private static bool TryApplySkinToMenuPreviewHierarchy(Transform root)
-        {
-            if (root == null) return false;
-            bool anyUpdated = false;
-            var renderers = root.GetComponentsInChildren<Renderer>(true);
-            if (renderers == null || renderers.Length == 0) return false;
-
-            for (int i = 0; i < renderers.Length; i++)
-            {
-                var ren = renderers[i];
-                if (ren == null) continue;
-
-                int rendererId;
-                try { rendererId = ren.GetInstanceID(); } catch { continue; }
-                if (CharmState.MenuPreviewRendererIds.Contains(rendererId)) continue;
-
-                if (TryApplySkinToMenuPreviewRenderer(ren))
-                {
-                    CharmState.MenuPreviewRendererIds.Add(rendererId);
-                    anyUpdated = true;
-                }
-            }
-            return anyUpdated;
-        }
-
-        private static bool TryApplySkinToMenuPreviewRenderer(Renderer ren)
-        {
-            var sharedMats = ren.sharedMaterials;
-            if (sharedMats == null || sharedMats.Length == 0) return false;
-
-            bool updated = false;
-            var newMats = new Il2CppReferenceArray<Material>(sharedMats.Length);
-
-            for (int i = 0; i < sharedMats.Length; i++)
-            {
-                var sourceMat = sharedMats[i];
-                if (sourceMat == null)
-                {
-                    newMats[i] = null;
-                    continue;
-                }
-
-                if (!ShouldReplaceSkinOnMenuPreviewMaterial(sourceMat, ren.gameObject.name))
-                {
-                    newMats[i] = sourceMat;
-                    continue;
-                }
-
-                var instancedMat = UnityEngine.Object.Instantiate(sourceMat);
-                if (instancedMat == null)
-                {
-                    newMats[i] = sourceMat;
-                    continue;
-                }
-
-                ApplySkinTexture(instancedMat, CharmState.CustomSkinTexture, CharmState.CustomSkinEmissionTexture);
-                newMats[i] = instancedMat;
-                updated = true;
-            }
-
-            if (!updated) return false;
-            ren.sharedMaterials = newMats;
-            return true;
-        }
-
-        private static bool ShouldReplaceSkinOnMenuPreviewMaterial(Material mat, string rendererName)
-        {
-            if (mat == null) return false;
-            string matName = (mat.name ?? string.Empty).ToLowerInvariant();
-            string shaderName = (mat.shader?.name ?? string.Empty).ToLowerInvariant();
-            string rendererLower = (rendererName ?? string.Empty).ToLowerInvariant();
-
-            if (matName.Contains("outline") || shaderName.Contains("outline")) return false;
-
-            foreach (string propName in new[] { "_MainTex", "_BaseMap", "_BaseColorMap" })
-            {
-                if (!mat.HasProperty(propName)) continue;
-                var tex = mat.GetTexture(propName);
-                string texName = tex != null ? (tex.name ?? string.Empty).ToLowerInvariant() : string.Empty;
-
-                if (tex == CharmState.CustomSkinTexture) return false;
-                if (texName.Contains("image_0")) return true;
-                if (texName.Contains("default")) return true;
-                if (texName.Contains("skin")) return true;
-                if (texName.Contains("phone")) return true;
-                if (matName.Contains("phone")) return true;
-                if (matName.Contains("default")) return true;
-                if (matName.Contains("skin")) return true;
-                if (rendererLower.Contains("phone") && !rendererLower.Contains("outline")) return true;
-            }
-            return false;
-        }
     }
 }

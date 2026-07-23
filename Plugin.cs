@@ -18,7 +18,7 @@ using DrawingColor = System.Drawing.Color;
 
 namespace CharmReplacer;
 
-[BepInPlugin("com.dani.charmreplacer", "CharmReplacer", "1.4.1")]
+[BepInPlugin("com.dani.charmreplacer", "CharmReplacer", "1.5.0")]
 public class Plugin : BasePlugin
 {
     internal static new ManualLogSource Log;
@@ -120,6 +120,52 @@ public class Plugin : BasePlugin
                 skipped.Add("PlayerSkins type");
             }
 
+            // --- v1.7+ unified skins/charms: EHS.Skins.PlayerSkins ---
+            // The old PlayerCharms/PlayerSkins classes were deleted in the v1.7 rework and
+            // merged into EHS.Skins.PlayerSkins, where a charm is just SkinCategory.Charm.
+            // Both apply paths (local + network) drive the same re-scan trigger.
+            var skinsPlayerType = FindGameType("EHS.Skins.PlayerSkins");
+            if (skinsPlayerType != null)
+            {
+                // ApplyLocalSkin is overloaded ((SkinUISO) vs (SkinCategory, string)); pick the
+                // (category, string) overload by shape to avoid AmbiguousMatchException.
+                var applyLocal = FindMethodBySecondStringParam(skinsPlayerType, "ApplyLocalSkin");
+                if (applyLocal != null)
+                {
+                    _harmony.Patch(applyLocal,
+                        postfix: new HarmonyMethod(typeof(CharmPatches), nameof(CharmPatches.SkinAppliedPostfix)));
+                    applied.Add("Skins.ApplyLocalSkin");
+                }
+                else
+                {
+                    skipped.Add("Skins.ApplyLocalSkin");
+                }
+
+                // Remote players: ApplySkinFromNetwork(SkinCategory, string) -> UniTaskVoid.
+                var applyNetwork = FindMethodBySecondStringParam(skinsPlayerType, "ApplySkinFromNetwork");
+                if (applyNetwork != null)
+                {
+                    _harmony.Patch(applyNetwork,
+                        postfix: new HarmonyMethod(typeof(CharmPatches), nameof(CharmPatches.SkinAppliedPostfix)));
+                    applied.Add("Skins.ApplySkinFromNetwork");
+                }
+                else
+                {
+                    skipped.Add("Skins.ApplySkinFromNetwork");
+                }
+
+                // Spawn hook: Init(PlayerRef) initializes a player's skins component (local or remote).
+                var initMethod = skinsPlayerType.GetMethod("Init",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (initMethod != null)
+                {
+                    _harmony.Patch(initMethod,
+                        postfix: new HarmonyMethod(typeof(PlayerSkinsPatches), nameof(PlayerSkinsPatches.StartPostfix)));
+                    applied.Add("Skins.PlayerSkins.Init");
+                }
+                // Not an error if absent: older versions use PlayerCharms/PlayerSkins above.
+            }
+
             // --- DestroyedPhoneEffectHandler ---
             var destroyedPhoneType = FindGameType("EHS.DestroyedPhoneEffectHandler") ?? FindGameType("DestroyedPhoneEffectHandler");
             if (destroyedPhoneType != null)
@@ -180,6 +226,22 @@ public class Plugin : BasePlugin
         {
             Log.LogError($"[Patch] Error: {ex}");
         }
+    }
+
+    // Finds an instance method by name whose signature is (something, string) — used to
+    // disambiguate the ApplyLocalSkin / ApplySkinFromNetwork (SkinCategory, string) overloads
+    // without hard-referencing the Il2Cpp enum type or risking AmbiguousMatchException.
+    private static MethodInfo FindMethodBySecondStringParam(Type type, string name)
+    {
+        if (type == null) return null;
+        foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        {
+            if (m.Name != name) continue;
+            var ps = m.GetParameters();
+            if (ps.Length == 2 && ps[1].ParameterType == typeof(string))
+                return m;
+        }
+        return null;
     }
 
     private static readonly Dictionary<string, Type> _typeCache = new Dictionary<string, Type>();

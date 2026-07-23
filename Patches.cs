@@ -30,6 +30,21 @@ internal static class CharmPatches
         }
         catch (Exception ex) { Plugin.Log.LogError($"[Skin] ChangeSkin postfix error: {ex}"); }
     }
+
+    // v1.7+ (EHS.Skins rework): charms and skins are one unified system, so a single
+    // ApplyLocalSkin / ApplySkinFromNetwork call can change either. We don't read the
+    // SkinCategory arg here, so refresh BOTH caches and let the per-frame fast poll
+    // re-apply. Re-swap churn is bounded by the ReswapCooldown in CharmSystem.
+    public static void SkinAppliedPostfix()
+    {
+        try
+        {
+            CharmState.SkinnedRendererIds.Clear();
+            CharmState.CharmedMeshFilterIds.Clear();
+            CharmReplacerBehavior.Instance?.RequestGameFastPoll();
+        }
+        catch (Exception ex) { Plugin.Log.LogError($"[Skin] SkinApplied postfix error: {ex}"); }
+    }
 }
 
 internal static class PlayerSkinsPatches
