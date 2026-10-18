@@ -23,6 +23,15 @@ namespace CharmReplacer
         /// <summary>True while any bundle is in flight (download or extraction).</summary>
         public static bool IsLoadingBundle => _isLoadingBundle;
 
+        /// <summary>The local charm is placed as a prefab (else its mesh is swapped into the game's charm).</summary>
+        public static bool LocalUsesPrefab =>
+            CharmState.CustomPrefab != null && (CharmState.CustomPrefabHasMagicaCloth || CharmState.CustomMesh == null);
+
+        // Prefab charms point up from the phone charm slot instead of along it.
+        internal static readonly Quaternion PrefabRotationOffset = Quaternion.Euler(-90f, 0f, 0f);
+
+        private const string CustomCharmNamePrefix = "CustomCharm_";
+
         // --- Public API ---
 
         public static void LoadCharmMesh()
@@ -157,14 +166,17 @@ namespace CharmReplacer
             // MeshFilter scan would put the local charm on EVERY player (the "charm leak")
             // and pre-empt remote players' own (physics-bearing) prefab charms. The charm
             // retry loop calls back until the owner resolves.
-            bool wantLocalCharm = useLocalPrefab
-                || (CharmState.CustomMesh == null && CharmState.CustomPrefab != null)
-                || CharmState.CustomMesh != null;
+            // Switched off from the game's customization menu: the phone charm stays as is.
+            bool localCharmOn = SkinOverride.IsLocalEnabled(EHS.Skins.SkinCategory.Charm);
+            bool wantLocalCharm = localCharmOn
+                && (useLocalPrefab
+                    || (CharmState.CustomMesh == null && CharmState.CustomPrefab != null)
+                    || CharmState.CustomMesh != null);
             if (wantLocalCharm && localPlayer == null)
                 Plugin.Log.LogDebug("[Charm] Local player not resolved yet; deferring local charm.");
 
             // === LOCAL PLAYER: full prefab when it carries its own MC2, mesh-swap fallback otherwise ===
-            if (localPlayer != null && (useLocalPrefab || (CharmState.CustomMesh == null && CharmState.CustomPrefab != null)))
+            if (localCharmOn && localPlayer != null && (useLocalPrefab || (CharmState.CustomMesh == null && CharmState.CustomPrefab != null)))
             {
                 try
                 {
@@ -193,7 +205,7 @@ namespace CharmReplacer
                     Plugin.Log.LogWarning($"[Charm] Local prefab replacement error: {ex.Message}");
                 }
             }
-            else if (localPlayer != null && CharmState.CustomMesh != null)
+            else if (localCharmOn && localPlayer != null && CharmState.CustomMesh != null)
             {
                 try
                 {
@@ -205,6 +217,9 @@ namespace CharmReplacer
                         {
                             var mf = filters[i];
                             if (mf == null || mf.sharedMesh == null) continue;
+                            // The replaced original is switched off; CharmedMeshFilterIds is cleared on
+                            // every skin apply, so this is what stops it from being cloned again.
+                            if (!mf.gameObject.activeInHierarchy) continue;
 
                             int instanceId = mf.GetInstanceID();
                             if (CharmState.CharmedMeshFilterIds.Contains(instanceId)) continue;
@@ -216,49 +231,10 @@ namespace CharmReplacer
                             if (meshName.StartsWith("CustomGorraMesh")) continue;
                             if (!IsCharmTarget(mf.gameObject)) continue;
 
-                            var mr = mf.GetComponent<MeshRenderer>();
-
-                            if (CharmState.BundleMaterials != null && mr != null && CharmState.BundleMaterials.Length > 0)
-                            {
-                                var newMats = new Il2CppReferenceArray<Material>(CharmState.BundleMaterials.Length);
-                                for (int m = 0; m < CharmState.BundleMaterials.Length; m++)
-                                {
-                                    var bundleMat = CharmState.BundleMaterials[m];
-                                    if (bundleMat == null)
-                                    {
-                                        if (mr.sharedMaterials != null && m < mr.sharedMaterials.Length)
-                                            newMats[m] = mr.sharedMaterials[m];
-                                        continue;
-                                    }
-                                    var cloned = UnityEngine.Object.Instantiate(bundleMat);
-                                    if (cloned != null)
-                                    {
-                                        cloned.hideFlags = HideFlags.DontUnloadUnusedAsset;
-                                        PrepareRuntimeMaterial(cloned);
-                                        newMats[m] = cloned;
-                                    }
-                                    else if (mr.sharedMaterials != null && m < mr.sharedMaterials.Length)
-                                    {
-                                        newMats[m] = mr.sharedMaterials[m];
-                                    }
-                                }
-                                mr.sharedMaterials = newMats;
-                            }
-                            else
-                            {
-                                if (CharmState.CapturedGameMaterials == null && mr != null
-                                    && mr.sharedMaterials != null && mr.sharedMaterials.Length > 0)
-                                    CharmState.CapturedGameMaterials = mr.sharedMaterials;
-                                if (CharmState.CapturedGameMaterials != null && mr != null)
-                                    mr.sharedMaterials = CharmState.CapturedGameMaterials;
-                            }
-
-                            mf.sharedMesh = CharmState.CustomMesh;
+                            if (!SwapCharmMesh(mf, CharmState.CustomMesh, CharmState.BundleMaterials)) continue;
                             Plugin.Log.LogInfo($"[Charm] Mesh replaced on '{mf.gameObject.name}'");
                             CharmState.CharmedMeshFilterIds.Add(instanceId);
                             CharmState.LocalCharmApplied = true;
-
-                            ResetMagicaCloth(mf);
                         }
                         catch (Exception ex)
                         {
@@ -285,6 +261,7 @@ namespace CharmReplacer
 
                         string nick = PlayerIdentity.GetPlayerNickname(playerGO);
                         if (string.IsNullOrEmpty(nick)) continue;
+                        if (!SkinOverride.AllowsRemoteCustom(playerGO, EHS.Skins.SkinCategory.Charm)) continue;
 
                         if (CharmState.PlayerCharmPrefabs.TryGetValue(nick, out var prefab) && PrefabHasMagicaCloth(prefab))
                         {
@@ -528,6 +505,14 @@ namespace CharmReplacer
 
             try
             {
+                // A placed custom charm sits next to the original under the phone charm instance, so
+                // its own meshes would match the parent-name check below and get replaced again.
+                for (var t = go.transform; t != null; t = t.parent)
+                {
+                    if ((t.name ?? string.Empty).StartsWith(CustomCharmNamePrefix, StringComparison.Ordinal))
+                        return false;
+                }
+
                 string goName = (go.name ?? string.Empty).ToLowerInvariant();
 
                 if (IsExactPhoneCharm(goName))
@@ -547,14 +532,100 @@ namespace CharmReplacer
             return false;
         }
 
-        // --- Apply charm to a single remote player (mesh-swap path) ---
+        // --- Mesh-only charms ---
 
-        // Rate-limit re-applying after the game reverts our swapped mesh (its charm network
-        // re-sync), so we don't get into a tight fight loop with the game.
-        private static readonly Dictionary<int, float> _lastReswap = new Dictionary<int, float>();
-        private const float ReswapCooldown = 2f;
-        // Log the "mesh-only = no reliable physics" hint once per charm root.
-        private static readonly HashSet<int> _meshOnlyHintLogged = new HashSet<int>();
+        /// <summary>
+        /// Shows <paramref name="mesh"/> in place of the charm mesh of <paramref name="mf"/>. Where the
+        /// game's charm has a cloth, the original is hidden and the custom mesh swings rigidly from the
+        /// same attachment point (CharmSwing); otherwise the mesh is swapped in place. False when nothing
+        /// was changed.
+        /// </summary>
+        private static bool SwapCharmMesh(MeshFilter mf, Mesh mesh, Il2CppReferenceArray<Material> materials)
+        {
+            var cloth = mf.GetComponentInParent<MagicaCloth2.MagicaCloth>(true);
+            if (cloth == null)
+            {
+                ApplyCharmMaterials(mf.GetComponent<MeshRenderer>(), materials);
+                mf.sharedMesh = mesh;
+                return true;
+            }
+
+            var parent = mf.transform.parent;
+            if (parent != null && FindCustomCharmBelow(parent) != null) return false;
+
+            // The custom charm is a charm of its own: the game's charm (mesh and strap) only provides
+            // the attachment point, so all of it is hidden.
+            var gameRenderers = cloth.GetComponentsInChildren<Renderer>(true);
+            if (gameRenderers != null)
+                for (int i = 0; i < gameRenderers.Count; i++)
+                    if (gameRenderers[i] != null) gameRenderers[i].enabled = false;
+
+            CharmSwing.Attach(mf, mesh, materials, ClothAnchor(cloth, mf, mesh), CustomCharmNamePrefix + "swing");
+
+            // Hide the original the same way the prefab path does (re-suppressed if the game re-enables it).
+            var originalGO = mf.gameObject;
+            originalGO.SetActive(false);
+            CharmState.ReplacedOriginalCharmGOs[mf.GetInstanceID()] = originalGO;
+            Plugin.Log.LogInfo($"[CharmPhysics] ✓ Swinging custom mesh on '{mf.gameObject.name}'.");
+            return true;
+        }
+
+        // Where the charm hangs from: the fixed (attachment) points painted in the game's cloth selection,
+        // which lives in the cloth's local space. Without them, the top of the mesh.
+        private static Vector3 ClothAnchor(MagicaCloth2.MagicaCloth cloth, MeshFilter mf, Mesh mesh)
+        {
+            var selection = cloth.serializeData2?.selectionData;
+            if (selection != null && selection.positions != null && selection.attributes != null)
+            {
+                var sum = Vector3.zero;
+                int fixedCount = 0;
+                int n = Math.Min(selection.positions.Length, selection.attributes.Length);
+                for (int i = 0; i < n; i++)
+                {
+                    if (!selection.attributes[i].IsFixed()) continue;
+                    var p = selection.positions[i];
+                    sum += new Vector3(p.x, p.y, p.z);
+                    fixedCount++;
+                }
+                if (fixedCount > 0) return cloth.transform.TransformPoint(sum / fixedCount);
+            }
+
+            var bounds = mesh.bounds;
+            return mf.transform.TransformPoint(new Vector3(bounds.center.x, bounds.max.y, bounds.center.z));
+        }
+
+        internal static void ApplyCharmMaterials(MeshRenderer mr, Il2CppReferenceArray<Material> targetMaterials)
+        {
+            if (mr == null) return;
+            if (targetMaterials != null && targetMaterials.Length > 0)
+            {
+                var newMats = new Il2CppReferenceArray<Material>(targetMaterials.Length);
+                for (int m = 0; m < targetMaterials.Length; m++)
+                {
+                    var bundleMat = targetMaterials[m];
+                    var cloned = bundleMat != null ? UnityEngine.Object.Instantiate(bundleMat) : null;
+                    if (cloned != null)
+                    {
+                        cloned.hideFlags = HideFlags.DontUnloadUnusedAsset;
+                        PrepareRuntimeMaterial(cloned);
+                        newMats[m] = cloned;
+                    }
+                    else if (mr.sharedMaterials != null && m < mr.sharedMaterials.Length)
+                    {
+                        newMats[m] = mr.sharedMaterials[m];
+                    }
+                }
+                mr.sharedMaterials = newMats;
+                return;
+            }
+
+            if (CharmState.CapturedGameMaterials == null && mr.sharedMaterials != null && mr.sharedMaterials.Length > 0)
+                CharmState.CapturedGameMaterials = mr.sharedMaterials;
+            if (CharmState.CapturedGameMaterials != null)
+                mr.sharedMaterials = CharmState.CapturedGameMaterials;
+        }
+
+        // --- Apply charm to a single remote player (mesh-swap path) ---
 
         private static void ApplyCharmToPlayer(GameObject playerGO, Mesh targetMesh, Il2CppReferenceArray<Material> targetMaterials)
         {
@@ -568,10 +639,10 @@ namespace CharmReplacer
                     var mf = filters[i];
                     if (mf == null || mf.sharedMesh == null) continue;
 
-                    // Skip inactive slots — a prefab replacement may have disabled the
-                    // original SM_Charm_Phone. Without this check the mesh-swap path
-                    // would re-apply to the hidden slot, producing a duplicate charm.
-                    if (!mf.gameObject.activeSelf) continue;
+                    // Skip inactive slots — a prefab replacement or a cloth clone has disabled the
+                    // original SM_Charm_Phone. Without this check it would be replaced again,
+                    // producing a duplicate charm.
+                    if (!mf.gameObject.activeInHierarchy) continue;
 
                     int instanceId = mf.GetInstanceID();
                     if (mf.sharedMesh == targetMesh) continue; // already our mesh — nothing to do
@@ -582,65 +653,9 @@ namespace CharmReplacer
 
                     if (!IsCharmTarget(mf.gameObject)) continue;
 
-                    // If we already swapped this slot but the mesh is no longer ours, the game
-                    // re-applied its original charm (ChangeCharmClient network re-sync). Re-apply
-                    // ours instead of leaving the original — but rate-limit so we never get into a
-                    // tight fight loop with the game.
-                    if (CharmState.CharmedMeshFilterIds.Contains(instanceId))
-                    {
-                        if (_lastReswap.TryGetValue(instanceId, out float t) && Time.time - t < ReswapCooldown)
-                            continue;
-                        _lastReswap[instanceId] = Time.time;
-                        Plugin.Log.LogWarning($"[Charm] Game reverted charm on '{mf.gameObject.name}'; re-applying custom mesh.");
-                    }
-
-                    var mr = mf.GetComponent<MeshRenderer>();
-
-                    if (targetMaterials != null && mr != null && targetMaterials.Length > 0)
-                    {
-                        var newMats = new Il2CppReferenceArray<Material>(targetMaterials.Length);
-                        for (int m = 0; m < targetMaterials.Length; m++)
-                        {
-                            var bundleMat = targetMaterials[m];
-                            if (bundleMat == null)
-                            {
-                                if (mr.sharedMaterials != null && m < mr.sharedMaterials.Length)
-                                    newMats[m] = mr.sharedMaterials[m];
-                                continue;
-                            }
-
-                            var cloned = UnityEngine.Object.Instantiate(bundleMat);
-                            if (cloned != null)
-                            {
-                                cloned.hideFlags = HideFlags.DontUnloadUnusedAsset;
-                                PrepareRuntimeMaterial(cloned);
-                                newMats[m] = cloned;
-                            }
-                            else if (mr.sharedMaterials != null && m < mr.sharedMaterials.Length)
-                            {
-                                newMats[m] = mr.sharedMaterials[m];
-                            }
-                        }
-                        mr.sharedMaterials = newMats;
-                    }
-                    else
-                    {
-                        if (CharmState.CapturedGameMaterials == null && mr != null
-                            && mr.sharedMaterials != null && mr.sharedMaterials.Length > 0)
-                        {
-                            CharmState.CapturedGameMaterials = mr.sharedMaterials;
-                        }
-                        if (CharmState.CapturedGameMaterials != null && mr != null)
-                        {
-                            mr.sharedMaterials = CharmState.CapturedGameMaterials;
-                        }
-                    }
-
-                    mf.sharedMesh = targetMesh;
+                    if (!SwapCharmMesh(mf, targetMesh, targetMaterials)) continue;
                     CharmState.CharmedMeshFilterIds.Add(instanceId);
                     Plugin.Log.LogInfo($"[Charm] ✓ Mesh replaced on '{mf.gameObject.name}'");
-
-                    ResetMagicaCloth(mf);
                 }
                 catch (Exception ex)
                 {
@@ -670,8 +685,15 @@ namespace CharmReplacer
             newCharm.transform.localPosition = originalGO.transform.localPosition;
             
             // Apply original rotation, but add an offset of -90 on the X axis to point it towards the sky
-            newCharm.transform.localRotation = originalGO.transform.localRotation * UnityEngine.Quaternion.Euler(-90f, 0f, 0f);
-            
+            newCharm.transform.localRotation = originalGO.transform.localRotation * PrefabRotationOffset;
+
+            // The phone charm's axes changed in the Steam release (that offset now points the charm at
+            // the back of the phone), so finish by aligning the charm with the phone's own up axis.
+            // Charm prefabs point along their -Y, so that is the axis that goes up.
+            var phoneUp = PhoneUp(originalGO.transform);
+            if (phoneUp.sqrMagnitude > 0f)
+                newCharm.transform.rotation = Quaternion.FromToRotation(-newCharm.transform.up, phoneUp) * newCharm.transform.rotation;
+
             // Preserve the user's prefab localScale, do not overwrite it with the original's.
 
             SetLayerRecursively(newCharm, originalGO.layer);
@@ -717,6 +739,28 @@ namespace CharmReplacer
             if (isLocal) CharmState.LocalCharmApplied = true;  // only block retries for local player
 
             Plugin.Log.LogInfo($"[Charm] ✓ Prefab replacing '{originalGO.name}' (layer={originalGO.layer})");
+        }
+
+        /// <summary>The phone charm mesh (not a placed custom charm) under <paramref name="root"/>.</summary>
+        internal static MeshFilter FindOriginalCharmMesh(Transform root)
+        {
+            var filters = root.GetComponentsInChildren<MeshFilter>(true);
+            if (filters == null) return null;
+            for (int i = 0; i < filters.Count; i++)
+                if (filters[i] != null && IsCharmTarget(filters[i].gameObject)) return filters[i];
+            return null;
+        }
+
+        // Up axis of the phone body the charm hangs from: the preview / main-menu visual root, else the
+        // player's rigidbody. Taken from the body rather than the world so a phone mid-flip still works.
+        internal static Vector3 PhoneUp(Transform charm)
+        {
+            var dummy = charm.GetComponentInParent<EHS.PlayerVisualsDummy>(true);
+            if (dummy != null && dummy.visualsRoot != null) return dummy.visualsRoot.up;
+            var menu = charm.GetComponentInParent<EHS.Skins.EquippedPlayerSkins>(true);
+            if (menu != null && menu.visualsRoot != null) return menu.visualsRoot.up;
+            var body = charm.GetComponentInParent<EHS.Skins.PlayerSkins>(true)?.playerRef?.rb;
+            return body != null ? body.transform.up : charm.root.up;
         }
 
         private static bool PrefabHasMagicaCloth(GameObject prefab)
@@ -792,7 +836,7 @@ namespace CharmReplacer
         /// Los shaders URP/SRP del bundle se respetan tal cual.
         /// Detecta shaders rotos (Hidden/InternalErrorShader) por si algún shader no está en el juego.
         /// </summary>
-        private static void FixMaterialShaders(GameObject newCharm)
+        internal static void FixMaterialShaders(GameObject newCharm)
         {
             try
             {
@@ -911,7 +955,7 @@ namespace CharmReplacer
             }
         }
 
-        private static void SetLayerRecursively(GameObject go, int layer)
+        internal static void SetLayerRecursively(GameObject go, int layer)
         {
             if (go == null) return;
             go.layer = layer;
@@ -945,56 +989,64 @@ namespace CharmReplacer
             }
         }
 
-        private static void ResetMagicaCloth(MeshFilter mf)
+        /// <summary>
+        /// Puts the local custom charm on an arbitrary visual (the customization preview), using the
+        /// same prefab/mesh choice as the local player.
+        /// </summary>
+        public static void ApplyLocalCharmTo(GameObject root)
         {
+            if (root == null) return;
             try
             {
-                var root = mf.transform.root.gameObject;
-                var allMBs = root.GetComponentsInChildren<MonoBehaviour>(true);
-
-                foreach (var mb in allMBs)
-                {
-                    if (mb == null) continue;
-                    string typeName = "";
-                    try { typeName = mb.GetIl2CppType()?.FullName ?? ""; } catch { continue; }
-
-                    if (!typeName.Contains("MagicaCloth2") && !typeName.Contains("MagicaCloth"))
-                        continue;
-
-                    // This is the game's OWN MagicaCloth on the original charm slot. A mesh-only
-                    // charm reuses it: we swap the mesh and BuildAndRun the game's cloth so it
-                    // simulates the NEW mesh. This only succeeds when the cloth is still FRESH
-                    // (unbuilt) — e.g. right after a graceful restart. If the phone has been spawned
-                    // a while (the usual case, and always for late remote downloads) MagicaCloth2
-                    // refuses with "[MC2] Already built" and the charm hangs static. Neither
-                    // disabling the component nor toggling the GameObject makes MC2 release that
-                    // built state (confirmed in-game: both still log "Already built", and toggling
-                    // makes the game re-clone the charm in a loop). So we do NOT fight it: a single
-                    // BuildAndRun gives physics in the fresh case and is a harmless no-op otherwise.
-                    // Reliable first-load physics require the charm to ship its OWN MagicaCloth2
-                    // (the prefab path) — see the hint below.
-                    try
-                    {
-                        var mc2 = mb.TryCast<MagicaCloth2.MagicaCloth>();
-                        if (mc2 != null) mc2.BuildAndRun();
-                    }
-                    catch (Exception ex) { Plugin.Log.LogWarning($"[CharmPhysics] BuildAndRun: {ex.Message}"); }
-
-                    if (_meshOnlyHintLogged.Add(root.GetInstanceID()))
-                        Plugin.Log.LogWarning(
-                            "[CharmPhysics] Mesh-only charm: physics only apply when the game's cloth " +
-                            "is fresh (after a restart). For physics on the FIRST load, export the charm " +
-                            "WITH a configured MagicaCloth2 component so it loads via the prefab path.");
-
-                    return;
-                }
-
-                Plugin.Log.LogWarning($"[CharmPhysics] No MagicaCloth/MagicaCloth2 found in hierarchy of '{root.name}'.");
+                if (LocalUsesPrefab)
+                    ApplyCharmPrefabToPlayer(root, CharmState.CustomPrefab);
+                else if (CharmState.CustomMesh != null)
+                    ApplyCharmToPlayer(root, CharmState.CustomMesh, CharmState.BundleMaterials);
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning($"[CharmPhysics] Error resetting MagicaCloth: {ex.Message}");
+                Plugin.Log.LogWarning($"[Charm] Preview charm error: {ex.Message}");
             }
+        }
+
+        /// <summary>The placed custom charm prefab under <paramref name="root"/>, if any.</summary>
+        public static Transform FindCustomCharm(Transform root)
+        {
+            if (root == null) return null;
+            if ((root.name ?? string.Empty).StartsWith(CustomCharmNamePrefix, StringComparison.Ordinal)) return root;
+            for (int i = 0; i < root.childCount; i++)
+            {
+                var found = FindCustomCharm(root.GetChild(i));
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Destroys placed custom charm prefabs under <paramref name="root"/>. ReplaceCharmWithPrefab
+        /// parents them next to the original charm, which may sit outside the skin instance that
+        /// SkinPrefabHandler.Clear destroys.
+        /// </summary>
+        public static void RemoveCustomCharms(Transform root)
+        {
+            if (root == null) return;
+            // Detach before Destroy (deferred to end of frame) so the next search skips it.
+            Transform charm;
+            while ((charm = FindCustomCharmBelow(root)) != null)
+            {
+                charm.SetParent(null, false);
+                UnityEngine.Object.Destroy(charm.gameObject);
+            }
+        }
+
+        private static Transform FindCustomCharmBelow(Transform root)
+        {
+            for (int i = 0; i < root.childCount; i++)
+            {
+                var found = FindCustomCharm(root.GetChild(i));
+                if (found != null) return found;
+            }
+            return null;
         }
     }
 }

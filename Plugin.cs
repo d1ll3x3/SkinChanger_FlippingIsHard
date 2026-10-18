@@ -39,6 +39,13 @@ public class Plugin : BasePlugin
         RemoteSkinService.Enabled = enableRemote.Value && !string.IsNullOrWhiteSpace(backendUrl.Value);
         RemoteSkinService.BaseUrl = backendUrl.Value?.Trim();
 
+        // --- Config: toggled from the "Custom" entries of the game's customization screen ---
+        var customCover = Config.Bind("NativeMenu", "CustomCoverEnabled", true,
+            "Show your custom skin (Skin.png) to yourself and to players with the mod. Players without the mod see the cover selected in the game's menu.");
+        var customCharm = Config.Bind("NativeMenu", "CustomCharmEnabled", true,
+            "Show your custom charm (hatbundle) to yourself and to players with the mod. Players without the mod see the charm selected in the game's menu.");
+        SkinOverride.Init(customCover, customCharm);
+
         ClassInjector.RegisterTypeInIl2Cpp<CharmReplacerBehavior>();
         AddComponent<CharmReplacerBehavior>();
 
@@ -166,6 +173,18 @@ public class Plugin : BasePlugin
                 // Not an error if absent: older versions use PlayerCharms/PlayerSkins above.
             }
 
+            // --- Native customization menu + per-viewer skin override ---
+            try
+            {
+                InstallNativeMenuPatches(applied, skipped);
+            }
+            catch (Exception ex)
+            {
+                // Type load failures land here: the game no longer has the types this code binds to.
+                Log.LogError($"[Patch] Native menu patches unavailable: {ex.Message}");
+                skipped.Add("NativeMenu");
+            }
+
             // --- DestroyedPhoneEffectHandler ---
             var destroyedPhoneType = FindGameType("EHS.DestroyedPhoneEffectHandler") ?? FindGameType("DestroyedPhoneEffectHandler");
             if (destroyedPhoneType != null)
@@ -226,6 +245,48 @@ public class Plugin : BasePlugin
         {
             Log.LogError($"[Patch] Error: {ex}");
         }
+    }
+
+    // Binds statically to the release build's interop types; kept in its own method so a missing
+    // type fails here (caught by the caller) instead of breaking the rest of InstallPatches.
+    private void InstallNativeMenuPatches(List<string> applied, List<string> skipped)
+    {
+        void Patch(Type type, string name, Type[] args, string prefix = null, string postfix = null, Type patches = null)
+        {
+            var method = AccessTools.Method(type, name, args);
+            if (method == null)
+            {
+                skipped.Add($"{type.Name}.{name}");
+                return;
+            }
+            _harmony.Patch(method,
+                prefix: prefix != null ? new HarmonyMethod(patches, prefix) : null,
+                postfix: postfix != null ? new HarmonyMethod(patches, postfix) : null);
+            applied.Add($"{type.Name}.{name}");
+        }
+
+        var menu = typeof(NativeMenuPatches);
+        var screen = typeof(EHS.CustomizationScreenController);
+        Patch(screen, nameof(EHS.CustomizationScreenController.ApplyEntries), null,
+            prefix: nameof(NativeMenuPatches.ApplyEntriesPrefix), patches: menu);
+        Patch(screen, nameof(EHS.CustomizationScreenController.IsSelectedSkin), null,
+            postfix: nameof(NativeMenuPatches.IsSelectedSkinPostfix), patches: menu);
+        Patch(screen, nameof(EHS.CustomizationScreenController.CompareSkinsByRarity), null,
+            postfix: nameof(NativeMenuPatches.CompareSkinsByRarityPostfix), patches: menu);
+        Patch(screen, nameof(EHS.CustomizationScreenController.OnSkinSelected), null,
+            prefix: nameof(NativeMenuPatches.OnSkinSelectedPrefix), patches: menu);
+
+        var manager = typeof(EHS.Skins.SkinsManager);
+        Patch(manager, nameof(EHS.Skins.SkinsManager.IsSkinUnlocked), new[] { typeof(string) },
+            postfix: nameof(NativeMenuPatches.IsSkinUnlockedPostfix), patches: menu);
+        Patch(manager, nameof(EHS.Skins.SkinsManager.IsNotSeenSkin), new[] { typeof(string) },
+            postfix: nameof(NativeMenuPatches.IsNotSeenSkinPostfix), patches: menu);
+
+        var overrides = typeof(SkinOverridePatches);
+        Patch(typeof(EHS.Skins.PlayerSkins), nameof(EHS.Skins.PlayerSkins.ApplySkinFromNetwork), null,
+            prefix: nameof(SkinOverridePatches.ApplySkinFromNetworkPrefix), patches: overrides);
+        Patch(typeof(EHS.PlayerVisualsDummy), nameof(EHS.PlayerVisualsDummy.OnSkinSyncChanged), null,
+            prefix: nameof(SkinOverridePatches.DummySkinSyncPrefix), patches: overrides);
     }
 
     // Finds an instance method by name whose signature is (something, string) — used to

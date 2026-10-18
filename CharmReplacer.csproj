@@ -76,6 +76,32 @@
       <HintPath>$(GamePath)\BepInEx\interop\Unity.Mathematics.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Native skin menu integration (EHS.Skins, CustomizationScreenController) only targets the
+         Steam release, so it references the game's interop types directly instead of by name. -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(GamePath)\BepInEx\interop\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="FishNet.Runtime">
+      <HintPath>$(GamePath)\BepInEx\interop\FishNet.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UniTask">
+      <HintPath>$(GamePath)\BepInEx\interop\UniTask.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.Addressables">
+      <HintPath>$(GamePath)\BepInEx\interop\Unity.Addressables.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.ResourceManager">
+      <HintPath>$(GamePath)\BepInEx\interop\Unity.ResourceManager.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(GamePath)\BepInEx\interop\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
   
 </Project>

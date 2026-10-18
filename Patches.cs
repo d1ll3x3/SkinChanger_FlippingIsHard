@@ -1,4 +1,6 @@
 using System;
+using EHS;
+using EHS.Skins;
 using Il2CppInterop.Runtime.InteropTypes;
 using UnityEngine;
 
@@ -75,10 +77,13 @@ internal static class DestroyedPhoneEffectHandlerPatches
             var rootGo = comp.gameObject.transform.root.gameObject;
             if (rootGo == PlayerIdentity.GetLocalPlayerGO())
             {
-                targetTex = CharmState.CustomSkinTexture;
-                targetEmission = CharmState.CustomSkinEmissionTexture;
+                if (SkinOverride.IsLocalEnabled(SkinCategory.Cover))
+                {
+                    targetTex = CharmState.CustomSkinTexture;
+                    targetEmission = CharmState.CustomSkinEmissionTexture;
+                }
             }
-            else
+            else if (SkinOverride.AllowsRemoteCustom(rootGo, SkinCategory.Cover))
             {
                 string nick = PlayerIdentity.GetPlayerNickname(rootGo);
                 if (!string.IsNullOrEmpty(nick) && CharmState.PlayerBaseTextures.TryGetValue(nick, out var pTex))
@@ -117,5 +122,69 @@ internal static class DestroyedPhoneEffectHandlerPatches
     {
         try { PrePaintDestroyedPhone(__instance); }
         catch (Exception ex) { Plugin.Log.LogError($"[Patch] SetToDestroyed postfix error: {ex}"); }
+    }
+}
+
+// Customization screen: the "Custom" entries (NativeSkinMenu).
+internal static class NativeMenuPatches
+{
+    public static void ApplyEntriesPrefix(CustomizationScreenController __instance, Il2CppSystem.Collections.Generic.List<SkinUISO> skins)
+    {
+        try { NativeSkinMenu.AddEntries(__instance, skins); }
+        catch (Exception ex) { Plugin.Log.LogError($"[NativeMenu] ApplyEntries prefix error: {ex}"); }
+    }
+
+    // The screen only lists unlocked skins and SkinsManager has never heard of ours.
+    public static void IsSkinUnlockedPostfix(string skinUISOKey, ref bool __result)
+    {
+        if (NativeSkinMenu.IsCustomKey(skinUISOKey)) __result = true;
+    }
+
+    // Not in the save's seen list either, which would show a permanent "new" badge.
+    public static void IsNotSeenSkinPostfix(string skinUISOKey, ref bool __result)
+    {
+        if (NativeSkinMenu.IsCustomKey(skinUISOKey)) __result = false;
+    }
+
+    public static void IsSelectedSkinPostfix(SkinUISO skin, ref bool __result)
+    {
+        try { if (NativeSkinMenu.IsCustom(skin)) __result = NativeSkinMenu.IsSelected(skin); }
+        catch (Exception ex) { Plugin.Log.LogError($"[NativeMenu] IsSelectedSkin postfix error: {ex}"); }
+    }
+
+    public static void CompareSkinsByRarityPostfix(SkinUISO left, SkinUISO right, ref int __result)
+    {
+        try { __result = NativeSkinMenu.Compare(left, right, __result); }
+        catch (Exception ex) { Plugin.Log.LogError($"[NativeMenu] CompareSkinsByRarity postfix error: {ex}"); }
+    }
+
+    public static bool OnSkinSelectedPrefix(CustomizationScreenController __instance, SkinUISO skin)
+    {
+        try { return NativeSkinMenu.OnSkinSelected(__instance, skin); }
+        catch (Exception ex)
+        {
+            Plugin.Log.LogError($"[NativeMenu] OnSkinSelected prefix error: {ex}");
+            return true;
+        }
+    }
+}
+
+// Which skin each viewer loads (SkinOverride).
+internal static class SkinOverridePatches
+{
+    public static bool ApplySkinFromNetworkPrefix(PlayerSkins __instance, SkinCategory category, ref string skinUISOKey)
+    {
+        try { return SkinOverride.BeforeApplySkin(__instance, category, ref skinUISOKey); }
+        catch (Exception ex)
+        {
+            Plugin.Log.LogError($"[NativeMenu] ApplySkinFromNetwork prefix error: {ex}");
+            return true;
+        }
+    }
+
+    public static void DummySkinSyncPrefix(PlayerVisualsDummy __instance, SkinCategory category, ref string skinUISOKey)
+    {
+        try { LocalVisuals.BeforeDummySync(__instance, category, ref skinUISOKey); }
+        catch (Exception ex) { Plugin.Log.LogError($"[NativeMenu] Preview sync prefix error: {ex}"); }
     }
 }

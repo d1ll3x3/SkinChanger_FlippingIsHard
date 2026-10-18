@@ -6,6 +6,7 @@ release_build/
 release_notes.md
 
 # IDE
+.claude/settings.local.json
 .vs/
 .vscode/
 .idea/

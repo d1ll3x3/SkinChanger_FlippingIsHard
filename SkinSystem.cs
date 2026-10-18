@@ -10,6 +10,8 @@ namespace CharmReplacer
     {
         public static void ApplySkinTexture(Material mat, Texture baseTex, Texture emissionTex)
         {
+            _paintedEmission[mat.GetInstanceID()] = emissionTex != null ? emissionTex.GetInstanceID() : 0;
+
             foreach (string propName in new[] { "_MainTex", "_BaseMap", "_BaseColorMap" })
             {
                 if (mat.HasProperty(propName))
@@ -63,11 +65,17 @@ namespace CharmReplacer
         // Cleared on scene change (materials are replaced, instanceIds change anyway).
         private static readonly Dictionary<int, bool> _materialPhoneDefaultCache = new Dictionary<int, bool>();
 
+        // Emission texture each painted clone received (0 = none), by material instanceId. When the
+        // shader has none of the slots EmissionApplied probes by name, a painted clone never looked
+        // done and every scan cloned it again (log: "8 phone source material(s) updated" per scan).
+        private static readonly Dictionary<int, int> _paintedEmission = new Dictionary<int, int>();
+
         /// <summary>Clear all per-scene material caches. Call from OnSceneLoaded.</summary>
         public static void ClearMaterialCache()
         {
             _materialPhoneDefaultCache.Clear();
             _shaderEmissionPropCache.Clear();
+            _paintedEmission.Clear();
         }
 
         private static void ApplyCachedEmissionProps(Material mat, Texture emissionTex)
@@ -259,6 +267,8 @@ namespace CharmReplacer
         /// <summary>True if the material already carries <paramref name="target"/> in any emission map slot.</summary>
         private static bool EmissionApplied(Material m, Texture target)
         {
+            if (_paintedEmission.TryGetValue(m.GetInstanceID(), out int painted))
+                return painted == target.GetInstanceID();
             foreach (var propName in s_emissionMapProps)
             {
                 if (m.HasProperty(propName) && m.GetTexture(propName) == target)
@@ -305,10 +315,14 @@ namespace CharmReplacer
                     // FIX: Reliable local player detection for both lobby and game
                     if (p == localPlayer)
                     {
-                        targetTex = CharmState.CustomSkinTexture;
-                        targetEmission = CharmState.CustomSkinEmissionTexture;
+                        // Switched off from the game's customization menu: keep the native cover.
+                        if (SkinOverride.IsLocalEnabled(EHS.Skins.SkinCategory.Cover))
+                        {
+                            targetTex = CharmState.CustomSkinTexture;
+                            targetEmission = CharmState.CustomSkinEmissionTexture;
+                        }
                     }
-                    else
+                    else if (SkinOverride.AllowsRemoteCustom(p, EHS.Skins.SkinCategory.Cover))
                     {
                         string nick = PlayerIdentity.GetPlayerNickname(p);
                         if (!string.IsNullOrEmpty(nick) && CharmState.PlayerBaseTextures.TryGetValue(nick, out var pTex))
@@ -438,10 +452,68 @@ namespace CharmReplacer
             return replaced;
         }
 
+        /// <summary>
+        /// Paints the exterior cover materials of one renderer with a clone carrying the texture.
+        /// Materials already carrying it (base and emission) are left alone, so repeated calls are cheap.
+        /// </summary>
+        private static int PaintRenderer(Renderer ren, Texture2D tex, Texture2D emission)
+        {
+            var sharedMats = ren.sharedMaterials;
+            if (sharedMats == null || sharedMats.Length == 0) return 0;
+
+            int painted = 0;
+            var newMats = new Il2CppReferenceArray<Material>(sharedMats.Length);
+            for (int m = 0; m < sharedMats.Length; m++)
+            {
+                var mat = sharedMats[m];
+                newMats[m] = mat;
+                if (mat == null) continue;
+
+                // Only the exterior phone cover — same specific matcher used in-game. No broad
+                // heuristic here, so we don't repaint menu backgrounds/reflections.
+                if (!IsMaterialPhoneDefault(mat)) continue;
+
+                var currentTex = mat.HasProperty("_MainTex") ? mat.GetTexture("_MainTex") : null;
+                if (currentTex == tex && (emission == null || EmissionApplied(mat, emission))) continue;
+
+                var clonedMat = UnityEngine.Object.Instantiate(mat);
+                if (clonedMat == null) continue;
+                clonedMat.hideFlags = HideFlags.DontUnloadUnusedAsset;
+                ApplySkinTexture(clonedMat, tex, emission);
+                newMats[m] = clonedMat;
+                painted++;
+            }
+
+            if (painted > 0) ren.sharedMaterials = newMats;
+            return painted;
+        }
+
+        /// <summary>Paints every exterior cover under <paramref name="root"/> (customization preview, icon studio).</summary>
+        public static int PaintPhoneCovers(GameObject root, Texture2D tex, Texture2D emission)
+        {
+            if (root == null || tex == null) return 0;
+            int painted = 0;
+            try
+            {
+                var renderers = root.GetComponentsInChildren<Renderer>(true);
+                if (renderers == null) return 0;
+                for (int i = 0; i < renderers.Length; i++)
+                {
+                    if (renderers[i] != null) painted += PaintRenderer(renderers[i], tex, emission);
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[Skin] Error painting '{root.name}': {ex.Message}");
+            }
+            return painted;
+        }
+
         public static int TryApplySkinToMainMenuPhonePreview()
         {
             if (!UnityEngine.SceneManagement.SceneManager.GetActiveScene().name.Contains("MainMenu")) return 0;
             if (CharmState.CustomSkinTexture == null) return 0;
+            if (!SkinOverride.IsLocalEnabled(EHS.Skins.SkinCategory.Cover)) return 0;
 
             int replaced = 0;
             try
@@ -458,37 +530,11 @@ namespace CharmReplacer
                     try { rendererId = ren.GetInstanceID(); } catch { continue; }
                     if (CharmState.MenuPreviewRendererIds.Contains(rendererId)) continue;
 
-                    var sharedMats = ren.sharedMaterials;
-                    if (sharedMats == null || sharedMats.Length == 0) continue;
-
-                    bool updated = false;
-                    var newMats = new Il2CppReferenceArray<Material>(sharedMats.Length);
-                    for (int m = 0; m < sharedMats.Length; m++)
+                    int painted = PaintRenderer(ren, CharmState.CustomSkinTexture, CharmState.CustomSkinEmissionTexture);
+                    if (painted > 0)
                     {
-                        var mat = sharedMats[m];
-                        newMats[m] = mat;
-                        if (mat == null) continue;
-
-                        // Only the exterior phone cover — same specific matcher used in-game. No broad
-                        // heuristic here, so we don't repaint menu backgrounds/reflections.
-                        if (!IsMaterialPhoneDefault(mat)) continue;
-
-                        var currentTex = mat.HasProperty("_MainTex") ? mat.GetTexture("_MainTex") : null;
-                        if (currentTex == CharmState.CustomSkinTexture) continue;
-
-                        var clonedMat = UnityEngine.Object.Instantiate(mat);
-                        if (clonedMat == null) continue;
-                        clonedMat.hideFlags = HideFlags.DontUnloadUnusedAsset;
-                        ApplySkinTexture(clonedMat, CharmState.CustomSkinTexture, CharmState.CustomSkinEmissionTexture);
-                        newMats[m] = clonedMat;
-                        updated = true;
-                        replaced++;
-                    }
-
-                    if (updated)
-                    {
-                        ren.sharedMaterials = newMats;
                         CharmState.MenuPreviewRendererIds.Add(rendererId);
+                        replaced += painted;
                     }
                 }
 

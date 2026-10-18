@@ -112,6 +112,11 @@ namespace CharmReplacer
                 // Remote skins/charms: manifest + download queue.
                 RemoteSkinService.Tick();
 
+                // Who sees the custom cover/charm, and the icons of the menu's "Custom" entries.
+                SkinOverride.Tick();
+                LocalVisuals.Tick();
+                IconStudio.Tick();
+
                 // MagicaCloth2 delayed re-enable queue (multiplayer-safe)
                 for (int ci = _pendingClothList.Count - 1; ci >= 0; ci--)
                 {
@@ -271,6 +276,13 @@ namespace CharmReplacer
             }
         }
 
+        // After animation and physics have placed the phone, so swinging charms follow this frame's pose.
+        public void LateUpdate()
+        {
+            try { CharmSwing.Tick(Time.deltaTime); }
+            catch (Exception ex) { Plugin.Log.LogError($"[CharmPhysics] Swing error: {ex}"); }
+        }
+
         public void DoScanAndReplace()
         {
             if (CharmState.CustomMesh == null && CharmState.CustomPrefab == null
@@ -360,6 +372,8 @@ namespace CharmReplacer
                 CharmState.SkinDebugLogged = false;
                 CharmState.DefaultPhoneTexture = null;
                 CharmState.DefaultPhoneTextureLogged = false;
+                SkinOverride.ClearSceneState();
+                LocalVisuals.ClearSceneState();
             }
 
             if (isGame)
