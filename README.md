@@ -45,7 +45,8 @@ website (no manual file swapping needed). Uploads are matched in-game by Steam I
 For a charm to **swing like cloth**, the prefab you put in the `hatbundle` **must include a
 configured MagicaCloth 2 component**. A mesh-only bundle (just a mesh + material) is shown as a charm
 of its own: the game's phone charm is hidden and your mesh hangs from the same attachment point,
-swinging as a rigid pendulum. See [`Tuto_Templates/`](Tuto_Templates) for presets and steps.
+swinging as a rigid pendulum (new in v1.5.0 and not tested in game yet; if it stays static, use a
+MagicaCloth 2 bundle). See [`Tuto_Templates/`](Tuto_Templates) for presets and steps.
 
 ## Charm & Skin Templates
 
