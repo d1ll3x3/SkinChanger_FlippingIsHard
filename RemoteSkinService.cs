@@ -194,11 +194,54 @@ namespace CharmReplacer
                     if (!string.IsNullOrEmpty(localNick))
                         EnsureOwnAssets(localNick, PlayerIdentity.GetPlayerSteamId(local));
                 }
+
+                foreach (var player in PlayerIdentity.GetAllPlayers())
+                {
+                    if (player == null || player == local) continue;
+                    AliasRenamedPlayer(player);
+                }
             }
             catch (Exception ex)
             {
                 Plugin.Log.LogDebug($"[Remote] ScanPlayers error: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// The menu prefetch keys a player's assets by the name stored in the manifest at upload time,
+        /// but in a match they are looked up by the current Steam name. When the lobby SteamID ties a
+        /// renamed player to their manifest entry, the already-loaded assets are also filed under the
+        /// current name (same objects, nothing downloaded or cloned).
+        /// </summary>
+        private static void AliasRenamedPlayer(GameObject player)
+        {
+            string nick = PlayerIdentity.GetPlayerNickname(player);
+            if (string.IsNullOrEmpty(nick) || CharmState.PlayerCharmPrefabs.ContainsKey(nick)
+                || CharmState.PlayerCharmMeshes.ContainsKey(nick) || CharmState.PlayerBaseTextures.ContainsKey(nick)) return;
+
+            string steamId = PlayerIdentity.GetPlayerSteamId(player);
+            if (!PlayerIdentity.IsValidSteamId64(steamId) || !_bySteamId.TryGetValue(steamId, out var entry)) return;
+            string from = entry.Name;
+            if (string.IsNullOrEmpty(from) || string.Equals(from, nick, StringComparison.OrdinalIgnoreCase)) return;
+
+            bool any = false;
+            any |= Alias(CharmState.PlayerCharmPrefabs, from, nick);
+            any |= Alias(CharmState.PlayerCharmMeshes, from, nick);
+            any |= Alias(CharmState.PlayerCharmMaterials, from, nick);
+            any |= Alias(CharmState.PlayerBaseTextures, from, nick);
+            any |= Alias(CharmState.PlayerEmissionTextures, from, nick);
+            if (any)
+            {
+                Plugin.Log.LogInfo($"[Remote] ✓ '{nick}' matched to uploaded assets of '{from}' by SteamID.");
+                CharmReplacerBehavior.Instance?.RequestGameFastPoll();
+            }
+        }
+
+        private static bool Alias<T>(Dictionary<string, T> map, string from, string to)
+        {
+            if (!map.TryGetValue(from, out var value)) return false;
+            map[to] = value;
+            return true;
         }
 
         /// <summary>

@@ -1,56 +1,28 @@
 using System;
-using System.Drawing.Imaging;
+using System.Buffers.Binary;
 using System.IO;
-using System.Runtime.InteropServices;
+using System.IO.Compression;
+using System.Text;
 using UnityEngine;
 
 namespace CharmReplacer
 {
     internal static class SkinLoader
     {
+        private static readonly byte[] s_pngSignature = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+
         /// <summary>
-        /// Load a PNG/JPG into a Unity Texture2D using LockBits for fast pixel access.
-        /// LockBits is 5-10x faster than GetPixel() because it reads the entire
-        /// bitmap buffer in one native call instead of crossing the managed boundary
-        /// for every single pixel.
+        /// Load a PNG into a Unity Texture2D. Decoded with the BCL (zlib + PNG row filters): the game's
+        /// IL2CPP build strips the managed ImageConversion.LoadImage, and System.Drawing.Common had to
+        /// ship next to the DLL — a player missing that copy got no skin at all, theirs or anyone's.
+        /// The backend only accepts PNG, so that is the only format handled.
         /// </summary>
         public static Texture2D LoadTextureFromFile(string path, string texName)
         {
             if (!File.Exists(path)) return null;
             try
             {
-#pragma warning disable CA1416
-                using var bmp = new System.Drawing.Bitmap(path);
-                int w = bmp.Width;
-                int h = bmp.Height;
-
-                // Lock the bitmap's bits for direct memory access
-                var rect = new System.Drawing.Rectangle(0, 0, w, h);
-                var bmpData = bmp.LockBits(rect, ImageLockMode.ReadOnly,
-                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-
-                var pixels = new Color32[w * h];
-                int stride = bmpData.Stride;
-
-                // Copy rows. Bitmap is stored bottom-up; Unity expects top-down.
-                // ARGB in memory = [B, G, R, A] on little-endian, Color32 is [r, g, b, a].
-                byte[] row = new byte[stride];
-                for (int y = 0; y < h; y++)
-                {
-                    int srcY = h - 1 - y; // flip vertically
-                    IntPtr srcRow = bmpData.Scan0 + srcY * stride;
-                    Marshal.Copy(srcRow, row, 0, stride);
-
-                    int destRowBase = y * w;
-                    for (int x = 0; x < w; x++)
-                    {
-                        int i = x * 4;
-                        pixels[destRowBase + x] = new Color32(row[i + 2], row[i + 1], row[i + 0], row[i + 3]);
-                    }
-                }
-
-                bmp.UnlockBits(bmpData);
-#pragma warning restore CA1416
+                var pixels = DecodePng(File.ReadAllBytes(path), out int w, out int h);
 
                 var tex = new Texture2D(w, h, TextureFormat.RGBA32, false);
                 tex.SetPixels32(pixels);
@@ -68,22 +40,150 @@ namespace CharmReplacer
             }
         }
 
+        private static Color32[] DecodePng(byte[] data, out int width, out int height)
+        {
+            if (data.Length < 8 || !data.AsSpan(0, 8).SequenceEqual(s_pngSignature))
+                throw new InvalidDataException("not a PNG file");
+
+            width = height = 0;
+            int bitDepth = 0, colorType = 0, interlace = 0;
+            byte[] palette = null, paletteAlpha = null;
+            using var idat = new MemoryStream();
+
+            int pos = 8;
+            while (pos + 8 <= data.Length)
+            {
+                int length = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(pos));
+                string type = Encoding.ASCII.GetString(data, pos + 4, 4);
+                int body = pos + 8;
+                if (length < 0 || body + length > data.Length) throw new InvalidDataException("truncated PNG chunk");
+
+                switch (type)
+                {
+                    case "IHDR":
+                        width = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(body));
+                        height = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(body + 4));
+                        bitDepth = data[body + 8];
+                        colorType = data[body + 9];
+                        interlace = data[body + 12];
+                        break;
+                    case "PLTE": palette = data.AsSpan(body, length).ToArray(); break;
+                    case "tRNS": paletteAlpha = data.AsSpan(body, length).ToArray(); break;
+                    case "IDAT": idat.Write(data, body, length); break;
+                }
+                if (type == "IEND") break;
+                pos = body + length + 4; // + CRC
+            }
+
+            if (width <= 0 || height <= 0) throw new InvalidDataException("PNG has no IHDR");
+            if (interlace != 0) throw new NotSupportedException("interlaced PNG; export it without interlacing");
+            if (bitDepth != 8 && bitDepth != 16) throw new NotSupportedException($"{bitDepth}-bit PNG; export it as 8-bit");
+            int channels = colorType switch
+            {
+                0 => 1, 2 => 3, 3 => 1, 4 => 2, 6 => 4,
+                _ => throw new InvalidDataException($"PNG color type {colorType}"),
+            };
+            if (colorType == 3 && (palette == null || bitDepth != 8)) throw new InvalidDataException("bad palette PNG");
+
+            int sample = bitDepth / 8;
+            int bpp = channels * sample; // filter distance in bytes
+            int stride = width * bpp;
+
+            var raw = new byte[(stride + 1) * height];
+            idat.Position = 0;
+            using (var z = new ZLibStream(idat, CompressionMode.Decompress))
+            {
+                int read = 0;
+                while (read < raw.Length)
+                {
+                    int n = z.Read(raw, read, raw.Length - read);
+                    if (n == 0) throw new InvalidDataException("truncated PNG image data");
+                    read += n;
+                }
+            }
+
+            var pixels = new Color32[width * height];
+            var prev = new byte[stride];
+            var line = new byte[stride];
+            for (int y = 0; y < height; y++)
+            {
+                int src = y * (stride + 1);
+                Buffer.BlockCopy(raw, src + 1, line, 0, stride);
+                Unfilter(raw[src], line, prev, bpp);
+
+                // PNG rows run top-down, Unity textures bottom-up.
+                int dst = (height - 1 - y) * width;
+                for (int x = 0; x < width; x++)
+                    pixels[dst + x] = ReadPixel(line, x * bpp, sample, colorType, palette, paletteAlpha);
+
+                (prev, line) = (line, prev);
+            }
+            return pixels;
+        }
+
+        private static void Unfilter(byte filter, byte[] line, byte[] prev, int bpp)
+        {
+            for (int i = 0; i < line.Length; i++)
+            {
+                int a = i >= bpp ? line[i - bpp] : 0;
+                int b = prev[i];
+                int c = i >= bpp ? prev[i - bpp] : 0;
+                int add = filter switch
+                {
+                    0 => 0,
+                    1 => a,
+                    2 => b,
+                    3 => (a + b) >> 1,
+                    4 => Paeth(a, b, c),
+                    _ => throw new InvalidDataException($"PNG filter {filter}"),
+                };
+                line[i] = (byte)(line[i] + add);
+            }
+        }
+
+        private static int Paeth(int a, int b, int c)
+        {
+            int p = a + b - c;
+            int pa = Math.Abs(p - a), pb = Math.Abs(p - b), pc = Math.Abs(p - c);
+            return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+        }
+
+        // 16-bit samples keep their high byte.
+        private static Color32 ReadPixel(byte[] line, int offset, int sample, int colorType, byte[] palette, byte[] paletteAlpha)
+        {
+            byte C(int k) => line[offset + k * sample];
+            switch (colorType)
+            {
+                case 0: { byte g = C(0); return new Color32(g, g, g, 255); }
+                case 2: return new Color32(C(0), C(1), C(2), 255);
+                case 3:
+                {
+                    int index = line[offset];
+                    if (index * 3 + 2 >= palette.Length) return new Color32(0, 0, 0, 255);
+                    byte alpha = paletteAlpha != null && index < paletteAlpha.Length ? paletteAlpha[index] : (byte)255;
+                    return new Color32(palette[index * 3], palette[index * 3 + 1], palette[index * 3 + 2], alpha);
+                }
+                case 4: { byte g = C(0); return new Color32(g, g, g, C(1)); }
+                default: return new Color32(C(0), C(1), C(2), C(3));
+            }
+        }
+
         public static void LoadCustomSkin()
         {
             string skinPath = Path.Combine(Plugin.PluginDirectory, "Skin.png");
             string emissionPath = Path.Combine(Plugin.PluginDirectory, "Skin_Emission.png");
-            
+
             var mainTex = LoadTextureFromFile(skinPath, "CustomPlayerSkin");
             if (mainTex != null)
             {
                 CharmState.CustomSkinTexture = mainTex;
-                Plugin.Log.LogInfo($"[Skin] ✓ Main Skin.png loaded via System.Drawing");
-                
+                Plugin.Log.LogInfo($"[Skin] ✓ Main Skin.png loaded");
+
                 var emissionTex = LoadTextureFromFile(emissionPath, "CustomPlayerSkinEmission");
                 if (emissionTex != null)
                 {
                     CharmState.CustomSkinEmissionTexture = emissionTex;
-                    Plugin.Log.LogInfo($"[Skin] ✓ Skin_Emission.png loaded via System.Drawing");
+                    Plugin.Log.LogInfo($"[Skin] ✓ Skin_Emission.png loaded");
                 }
             }
 
@@ -105,7 +205,7 @@ namespace CharmReplacer
                     if (tex != null)
                     {
                         CharmState.PlayerBaseTextures[fileName] = tex;
-                        
+
                         string emFile = Path.Combine(Path.GetDirectoryName(file), fileName + "_emission.png");
                         var emTex = LoadTextureFromFile(emFile, $"skinemission_{fileName}");
                         if (emTex != null)
@@ -120,7 +220,7 @@ namespace CharmReplacer
                     }
                 }
             }
-            
+
             if (CharmState.CustomSkinTexture == null && CharmState.PlayerBaseTextures.Count == 0)
             {
                 Plugin.Log.LogWarning($"[Skin] No custom skins found in Plugin directory or Skins/ folder.");

@@ -109,6 +109,7 @@ namespace CharmReplacer
                     try { TickDummy(dummy, category); }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[NativeMenu] Preview {category} error: {ex.Message}"); }
                 }
+                CapFlip.EvaluateLocal(SkinOverride.GetHandler(dummy.skinsHandlerMap, SkinCategory.AccessoryHead));
             }
 
             foreach (var visual in _menuVisuals)
@@ -119,6 +120,7 @@ namespace CharmReplacer
                     try { TickMenuVisual(visual, category); }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[NativeMenu] Menu phone {category} error: {ex.Message}"); }
                 }
+                CapFlip.EvaluateLocal(FindHandler(visual, SkinCategory.AccessoryHead));
             }
         }
 

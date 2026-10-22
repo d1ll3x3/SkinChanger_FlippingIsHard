@@ -2,7 +2,7 @@
 
 ## Features
 
-- **Full game support**: v1.5.0 targets the Steam release of *Flipping is Hard* (the v1.7 skin rework,
+- **Full game support**: v1.5.x targets the Steam release of *Flipping is Hard* (the v1.7 skin rework,
   where covers and charms are one system). For the demo and playtests, use v1.4.x.
 - **Custom entries in the game's menu**: a **Custom** entry appears first in the **Cover** and
   **Charm** tabs of the customization screen. Click it to switch your custom cover or charm on or off;
@@ -20,8 +20,6 @@
     ```text
     Flipping is Hard/BepInEx/plugins/charmreplacer/
     ├── CharmReplacer.dll
-    ├── System.Drawing.Common.dll
-    ├── Microsoft.Win32.SystemEvents.dll
     ├── Skin.png (Your own skin)
     ├── Skin_Emission.png (Your own Emission map)
     ├── hatbundle (Your own charm)

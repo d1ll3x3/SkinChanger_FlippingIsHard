@@ -4,20 +4,18 @@
     <TargetFramework>net6.0</TargetFramework>
     <AssemblyName>CharmReplacer</AssemblyName>
     <Product>CharmReplacer</Product>
-    <Version>1.5.0</Version>
+    <Version>1.5.1</Version>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <GenerateNullableAttributes>false</GenerateNullableAttributes>
     <RootNamespace>CharmReplacer</RootNamespace>
-    <UseSystemDrawing>true</UseSystemDrawing>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="BepInEx.Unity.IL2CPP" Version="6.0.0-be.*" IncludeAssets="compile" />
     <PackageReference Include="BepInEx.PluginInfoProps" Version="2.*" />
-    <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -74,6 +72,10 @@
     </Reference>
     <Reference Include="Unity.Mathematics">
       <HintPath>$(GamePath)\BepInEx\interop\Unity.Mathematics.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="com.rlabrecque.steamworks.net">
+      <HintPath>$(GamePath)\BepInEx\interop\com.rlabrecque.steamworks.net.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <!-- Native skin menu integration (EHS.Skins, CustomizationScreenController) only targets the

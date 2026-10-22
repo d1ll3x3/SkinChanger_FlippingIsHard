@@ -13,12 +13,10 @@ using System;
 using System.IO;
 using System.Reflection;
 using System.Collections.Generic;
-using DrawingBitmap = System.Drawing.Bitmap;
-using DrawingColor = System.Drawing.Color;
 
 namespace CharmReplacer;
 
-[BepInPlugin("com.dani.charmreplacer", "CharmReplacer", "1.5.0")]
+[BepInPlugin("com.dani.charmreplacer", "CharmReplacer", "1.5.1")]
 public class Plugin : BasePlugin
 {
     internal static new ManualLogSource Log;

@@ -214,13 +214,54 @@ namespace CharmReplacer
                 Plugin.Log.LogDebug($"[PlayerIdentity] GetPlayerSteamId error: {ex.Message}");
             }
 
-            // Diagnostic (once per player instance): tells us from the logs whether the game
-            // actually exposes a real SteamID64 on PlayerNetworked, or if we fall back to name.
-            if (_loggedSteamIds.Add(instanceId))
-                Plugin.Log.LogInfo($"[PlayerIdentity] Resolved SteamID: {(string.IsNullOrEmpty(result) ? "<none — using name>" : result)}");
+            // The v1.7 release syncs no SteamID64 on PlayerNetworked, but the Steam lobby lists every
+            // member under the same persona name NicknameSyncVar carries.
+            if (string.IsNullOrEmpty(result))
+                result = SteamIdFromLobby(GetPlayerNickname(p));
 
+            if (string.IsNullOrEmpty(result))
+            {
+                // A member can join the lobby after their player spawns: keep asking instead of caching the miss.
+                if (_loggedSteamIds.Add(instanceId))
+                    Plugin.Log.LogInfo("[PlayerIdentity] Resolved SteamID: <none — using name>");
+                return string.Empty;
+            }
+
+            Plugin.Log.LogInfo($"[PlayerIdentity] Resolved SteamID: {result}");
             _steamIdCache[instanceId] = result;
             return result;
+        }
+
+        private static EHS.Steam.SteamManager _steamManager;
+
+        /// <summary>SteamID64 of the current lobby member whose persona name is <paramref name="nick"/>, else null.</summary>
+        private static string SteamIdFromLobby(string nick)
+        {
+            if (string.IsNullOrEmpty(nick)) return null;
+            try
+            {
+                if (_steamManager == null)
+                    _steamManager = UnityEngine.Object.FindObjectOfType<EHS.Steam.SteamManager>();
+                if (_steamManager == null) return null;
+
+                var lobby = _steamManager.CurrentLobbySteamId;
+                if (lobby.m_SteamID == 0UL) return null;
+
+                int count = Steamworks.SteamMatchmaking.GetNumLobbyMembers(lobby);
+                for (int i = 0; i < count; i++)
+                {
+                    var member = Steamworks.SteamMatchmaking.GetLobbyMemberByIndex(lobby, i);
+                    string name = Steamworks.SteamFriends.GetFriendPersonaName(member);
+                    if (!string.Equals(name?.Trim(), nick.Trim(), StringComparison.OrdinalIgnoreCase)) continue;
+                    string id = member.m_SteamID.ToString();
+                    return IsValidSteamId64(id) ? id : null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogDebug($"[PlayerIdentity] Lobby SteamID lookup error: {ex.Message}");
+            }
+            return null;
         }
 
         private static readonly HashSet<int> _loggedSteamIds = new HashSet<int>();

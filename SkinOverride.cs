@@ -81,6 +81,7 @@ namespace CharmReplacer
         {
             _lastVisible.Clear();
             _lastEnsure.Clear();
+            CapFlip.ClearSceneState();
         }
 
         // ── Remote state ──────────────────────────────────────────────────────
@@ -222,6 +223,7 @@ namespace CharmReplacer
                         if (networked.IsOwner) PushLocalFlag(networked);
                         foreach (var category in s_categories)
                             EvaluatePlayer(skins, networked, category);
+                        CapFlip.Evaluate(skins, networked);
                     }
                 }
             }
@@ -233,10 +235,12 @@ namespace CharmReplacer
 
         private static string BuildLocalFlag()
         {
-            if (!HasLocalAsset(SkinCategory.Cover) && !HasLocalAsset(SkinCategory.Charm)) return "";
+            string extra = CapFlip.LocalFlagToken();
+            if (!HasLocalAsset(SkinCategory.Cover) && !HasLocalAsset(SkinCategory.Charm) && extra.Length == 0) return "";
             return FlagPrefix
                 + "cover=" + (IsLocalActive(SkinCategory.Cover) ? 1 : 0)
-                + ";charm=" + (IsLocalActive(SkinCategory.Charm) ? 1 : 0);
+                + ";charm=" + (IsLocalActive(SkinCategory.Charm) ? 1 : 0)
+                + extra;
         }
 
         private static void PushLocalFlag(PlayerNetworked networked)
