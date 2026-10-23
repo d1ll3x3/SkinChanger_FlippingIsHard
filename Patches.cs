@@ -118,6 +118,13 @@ internal static class DestroyedPhoneEffectHandlerPatches
         catch (Exception ex) { Plugin.Log.LogError($"[Patch] SetToNormal postfix error: {ex}"); }
     }
 
+    // Cover pieces cloned into debris must not carry the jump glow along (CoverExtras).
+    public static void DebrisPostfix(Transform __result)
+    {
+        try { CoverExtras.StripFromDebris(__result); }
+        catch (Exception ex) { Plugin.Log.LogError($"[Patch] Debris postfix error: {ex}"); }
+    }
+
     public static void SetToDestroyedPostfix(Il2CppObjectBase __instance)
     {
         try { PrePaintDestroyedPhone(__instance); }
@@ -156,6 +163,32 @@ internal static class NativeMenuPatches
     {
         try { __result = NativeSkinMenu.Compare(left, right, __result); }
         catch (Exception ex) { Plugin.Log.LogError($"[NativeMenu] CompareSkinsByRarity postfix error: {ex}"); }
+    }
+
+    // The Mod tab (ModMenuTab): cloned in before the screen collects its tabs, and kept available.
+    public static void InitCategoryTabsPrefix(CustomizationScreenController __instance)
+    {
+        try { ModMenuTab.EnsureTab(__instance); }
+        catch (Exception ex) { Plugin.Log.LogError($"[NativeMenu] InitCategoryTabs prefix error: {ex}"); }
+    }
+
+    public static void SetCategoryAvailablePrefix(SkinCategoryTabButton __instance, ref bool isAvailable)
+    {
+        try { ModMenuTab.KeepAvailable(__instance, ref isAvailable); }
+        catch (Exception ex) { Plugin.Log.LogError($"[NativeMenu] SetCategoryAvailable prefix error: {ex}"); }
+    }
+
+    // Text labels on entry buttons; the pool reuses buttons, so each setup starts from the game's look.
+    public static void EntrySetupPrefix(SkinEntryButton __instance)
+    {
+        try { ModMenuTab.BeforeEntrySetup(__instance); }
+        catch (Exception ex) { Plugin.Log.LogError($"[NativeMenu] Entry setup prefix error: {ex}"); }
+    }
+
+    public static void EntrySetupPostfix(SkinEntryButton __instance, SkinUISO skin)
+    {
+        try { ModMenuTab.AfterEntrySetup(__instance, skin); }
+        catch (Exception ex) { Plugin.Log.LogError($"[NativeMenu] Entry setup postfix error: {ex}"); }
     }
 
     public static bool OnSkinSelectedPrefix(CustomizationScreenController __instance, SkinUISO skin)

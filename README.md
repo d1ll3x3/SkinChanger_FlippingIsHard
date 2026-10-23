@@ -2,11 +2,16 @@
 
 ## Features
 
-- **Full game support**: v1.5.x targets the Steam release of *Flipping is Hard* (the v1.7 skin rework,
+- **Full game support**: v1.5+ targets the Steam release of *Flipping is Hard* (the v1.7 skin rework,
   where covers and charms are one system). For the demo and playtests, use v1.4.x.
-- **Custom entries in the game's menu**: a **Custom** entry appears first in the **Cover** and
-  **Charm** tabs of the customization screen. Click it to switch your custom cover or charm on or off;
-  the preview and the main-menu phone show it too.
+- **Mod tab in the game's menu**: the customization screen gets a **Mod** tab with every option of the
+  mod. **Custom** Cover/Charm switch your custom cover or charm on or off; the preview and the
+  main-menu phone show it too.
+- **Cover colour**: a colour entry in the Mod tab steps through a palette on each click. It tints any
+  cover and gives the Wizard cover a matching colour theme (its swirls keep moving).
+- **Jump glow**: the **Jump** entry lights up your cover's side lines while your jump is available, on
+  any cover, in the colour picked with the glow colour entry (red by default).
+- Your cover colour and jump glow are shown to other players with the mod.
 - **Multiplayer Skins & Charms**: Your friends can see your custom skin and you can see theirs! Just place each other's files in the mod folder!
 - **Players without the mod** see the native skin you have selected in the menu, so pick one you like
   under your custom one.

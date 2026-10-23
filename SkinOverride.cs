@@ -72,7 +72,12 @@ namespace CharmReplacer
             if (entry == null) return;
             entry.Value = !entry.Value;
             Plugin.Log.LogInfo($"[NativeMenu] Custom {category} {(entry.Value ? "enabled" : "disabled")}.");
-            // Evaluate now rather than on the next tick so the preview and the player react on click.
+            RequestRefresh();
+        }
+
+        /// <summary>Evaluate and publish now rather than on the next tick, so a menu click shows at once.</summary>
+        public static void RequestRefresh()
+        {
             _nextTick = 0f;
             _nextFlagSend = 0f;
         }
@@ -91,6 +96,14 @@ namespace CharmReplacer
             var collection = networked?.SkinSync?.Collection;
             if (collection == null || !collection.ContainsKey(category)) return null;
             return collection[category];
+        }
+
+        /// <summary>The tokens of a remote player's flag, or none when they publish no flag.</summary>
+        internal static string[] RemoteFlagTokens(PlayerNetworked networked)
+        {
+            string flag = ReadSync(networked, SkinCategory.None);
+            if (flag == null || !flag.StartsWith(FlagPrefix, StringComparison.Ordinal)) return Array.Empty<string>();
+            return flag.Substring(FlagPrefix.Length).Split(';');
         }
 
         // null = the player publishes no flag (no mod, or a mod version from before the flag).
@@ -224,6 +237,10 @@ namespace CharmReplacer
                         foreach (var category in s_categories)
                             EvaluatePlayer(skins, networked, category);
                         CapFlip.Evaluate(skins, networked);
+                        CoverExtras.Apply(GetHandler(skins.skinsHandlerMap, SkinCategory.Cover),
+                            skins.skinsManager?.skinAddressableLibrary,
+                            networked.IsOwner ? CoverExtras.LocalLook() : CoverExtras.RemoteLook(networked),
+                            skins.playerRef?.playerJumpEnabledShader);
                     }
                 }
             }
@@ -235,7 +252,7 @@ namespace CharmReplacer
 
         private static string BuildLocalFlag()
         {
-            string extra = CapFlip.LocalFlagToken();
+            string extra = CapFlip.LocalFlagToken() + CoverExtras.LocalFlagTokens();
             if (!HasLocalAsset(SkinCategory.Cover) && !HasLocalAsset(SkinCategory.Charm) && extra.Length == 0) return "";
             return FlagPrefix
                 + "cover=" + (IsLocalActive(SkinCategory.Cover) ? 1 : 0)

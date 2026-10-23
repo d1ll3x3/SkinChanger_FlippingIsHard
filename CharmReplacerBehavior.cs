@@ -281,6 +281,8 @@ namespace CharmReplacer
         {
             try { CharmSwing.Tick(Time.deltaTime); }
             catch (Exception ex) { Plugin.Log.LogError($"[CharmPhysics] Swing error: {ex}"); }
+            try { CoverExtras.TickFrame(); }
+            catch (Exception ex) { Plugin.Log.LogError($"[Skin] Cover extras frame error: {ex}"); }
         }
 
         public void DoScanAndReplace()

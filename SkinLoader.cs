@@ -168,6 +168,74 @@ namespace CharmReplacer
             }
         }
 
+        /// <summary>Encodes bottom-up RGBA pixels (Unity's order) as an 8-bit RGBA PNG.</summary>
+        public static byte[] EncodePng(Color32[] pixels, int width, int height)
+        {
+            int stride = width * 4;
+            var raw = new byte[(stride + 1) * height];
+            for (int y = 0; y < height; y++)
+            {
+                int dst = y * (stride + 1) + 1; // filter byte 0 = none
+                int src = (height - 1 - y) * width;
+                for (int x = 0; x < width; x++)
+                {
+                    var c = pixels[src + x];
+                    raw[dst + x * 4] = c.r;
+                    raw[dst + x * 4 + 1] = c.g;
+                    raw[dst + x * 4 + 2] = c.b;
+                    raw[dst + x * 4 + 3] = c.a;
+                }
+            }
+
+            using var idat = new MemoryStream();
+            using (var z = new ZLibStream(idat, System.IO.Compression.CompressionLevel.Fastest, true)) z.Write(raw, 0, raw.Length);
+
+            var header = new byte[13];
+            BinaryPrimitives.WriteInt32BigEndian(header.AsSpan(0), width);
+            BinaryPrimitives.WriteInt32BigEndian(header.AsSpan(4), height);
+            header[8] = 8; // bit depth
+            header[9] = 6; // RGBA
+
+            using var png = new MemoryStream();
+            png.Write(s_pngSignature, 0, s_pngSignature.Length);
+            WriteChunk(png, "IHDR", header);
+            WriteChunk(png, "IDAT", idat.ToArray());
+            WriteChunk(png, "IEND", Array.Empty<byte>());
+            return png.ToArray();
+        }
+
+        private static void WriteChunk(Stream output, string type, byte[] body)
+        {
+            var buffer = new byte[4];
+            BinaryPrimitives.WriteInt32BigEndian(buffer, body.Length);
+            output.Write(buffer, 0, 4);
+            var typeBytes = Encoding.ASCII.GetBytes(type);
+            output.Write(typeBytes, 0, 4);
+            output.Write(body, 0, body.Length);
+            uint crc = Crc32(Crc32(0xFFFFFFFFu, typeBytes), body) ^ 0xFFFFFFFFu;
+            BinaryPrimitives.WriteUInt32BigEndian(buffer, crc);
+            output.Write(buffer, 0, 4);
+        }
+
+        private static uint[] s_crcTable;
+
+        private static uint Crc32(uint crc, byte[] data)
+        {
+            if (s_crcTable == null)
+            {
+                var table = new uint[256];
+                for (uint n = 0; n < 256; n++)
+                {
+                    uint c = n;
+                    for (int k = 0; k < 8; k++) c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+                    table[n] = c;
+                }
+                s_crcTable = table;
+            }
+            foreach (byte b in data) crc = s_crcTable[(crc ^ b) & 0xFF] ^ (crc >> 8);
+            return crc;
+        }
+
         public static void LoadCustomSkin()
         {
             string skinPath = Path.Combine(Plugin.PluginDirectory, "Skin.png");

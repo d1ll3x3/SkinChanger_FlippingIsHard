@@ -16,7 +16,7 @@ using System.Collections.Generic;
 
 namespace CharmReplacer;
 
-[BepInPlugin("com.dani.charmreplacer", "CharmReplacer", "1.5.1")]
+[BepInPlugin("com.dani.charmreplacer", "CharmReplacer", "1.6.0")]
 public class Plugin : BasePlugin
 {
     internal static new ManualLogSource Log;
@@ -43,6 +43,21 @@ public class Plugin : BasePlugin
         var customCharm = Config.Bind("NativeMenu", "CustomCharmEnabled", true,
             "Show your custom charm (hatbundle) to yourself and to players with the mod. Players without the mod see the charm selected in the game's menu.");
         SkinOverride.Init(customCover, customCharm);
+
+        // --- Config: cover extras (CoverExtras) ---
+        var jumpGlow = Config.Bind("NativeMenu", "JumpGlowEnabled", false,
+            "Light up the cover's side lines while the jump is available, on any cover. Toggled from the Jump Glow entry in the Cover tab; players with the mod see it too.");
+        var jumpGlowColor = Config.Bind("CoverExtras", "JumpGlowColor", "FF0000",
+            "Hex RGB colour of the jump glow (e.g. FF0000 for red). Cycled from the Glow Colour entry in the Cover tab.");
+        var coverTint = Config.Bind("CoverExtras", "CoverTint", "",
+            "Hex RGB tint for your cover (empty = the game's colours). Cycled from the Cover Colour entry in the Cover tab, which also sets the Wizard colours below.");
+        var wizardColors = new[]
+        {
+            Config.Bind("CoverExtras", "WizardColorTop", "", "Hex RGB for the top colour of the Wizard cover. Empty keeps the game's colour."),
+            Config.Bind("CoverExtras", "WizardColorBottom", "", "Hex RGB for the bottom colour of the Wizard cover. Empty keeps the game's colour."),
+            Config.Bind("CoverExtras", "WizardColorSwirl", "", "Hex RGB for the moving swirls of the Wizard cover. Empty keeps the game's colour."),
+        };
+        CoverExtras.Init(jumpGlow, jumpGlowColor, coverTint, wizardColors);
 
         ClassInjector.RegisterTypeInIl2Cpp<CharmReplacerBehavior>();
         AddComponent<CharmReplacerBehavior>();
@@ -213,6 +228,22 @@ public class Plugin : BasePlugin
                     skipped.Add("DestroyedPhone.SetToNormal");
                 }
 
+                foreach (var debrisMethodName in new[] { "CreateAttachedDebrisVisual", "CreatePhysicalDebris" })
+                {
+                    var debrisMethod = destroyedPhoneType.GetMethod(debrisMethodName,
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (debrisMethod != null)
+                    {
+                        _harmony.Patch(debrisMethod,
+                            postfix: new HarmonyMethod(typeof(DestroyedPhoneEffectHandlerPatches), nameof(DestroyedPhoneEffectHandlerPatches.DebrisPostfix)));
+                        applied.Add("DestroyedPhone." + debrisMethodName);
+                    }
+                    else
+                    {
+                        skipped.Add("DestroyedPhone." + debrisMethodName);
+                    }
+                }
+
                 var setToDestroyedMethod = destroyedPhoneType.GetMethod("SetToDestroyed",
                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                 if (setToDestroyedMethod != null)
@@ -273,6 +304,14 @@ public class Plugin : BasePlugin
             postfix: nameof(NativeMenuPatches.CompareSkinsByRarityPostfix), patches: menu);
         Patch(screen, nameof(EHS.CustomizationScreenController.OnSkinSelected), null,
             prefix: nameof(NativeMenuPatches.OnSkinSelectedPrefix), patches: menu);
+        Patch(screen, nameof(EHS.CustomizationScreenController.InitCategoryTabs), null,
+            prefix: nameof(NativeMenuPatches.InitCategoryTabsPrefix), patches: menu);
+        Patch(typeof(EHS.SkinCategoryTabButton), nameof(EHS.SkinCategoryTabButton.SetCategoryAvailable), null,
+            prefix: nameof(NativeMenuPatches.SetCategoryAvailablePrefix), patches: menu);
+        Patch(typeof(EHS.SkinEntryButton), nameof(EHS.SkinEntryButton.Setup), null,
+            prefix: nameof(NativeMenuPatches.EntrySetupPrefix), postfix: nameof(NativeMenuPatches.EntrySetupPostfix), patches: menu);
+        Patch(typeof(EHS.SkinEntryButton), nameof(EHS.SkinEntryButton.SetupLocked), null,
+            prefix: nameof(NativeMenuPatches.EntrySetupPrefix), patches: menu);
 
         var manager = typeof(EHS.Skins.SkinsManager);
         Patch(manager, nameof(EHS.Skins.SkinsManager.IsSkinUnlocked), new[] { typeof(string) },

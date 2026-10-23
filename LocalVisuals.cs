@@ -110,6 +110,8 @@ namespace CharmReplacer
                     catch (Exception ex) { Plugin.Log.LogWarning($"[NativeMenu] Preview {category} error: {ex.Message}"); }
                 }
                 CapFlip.EvaluateLocal(SkinOverride.GetHandler(dummy.skinsHandlerMap, SkinCategory.AccessoryHead));
+                CoverExtras.Apply(SkinOverride.GetHandler(dummy.skinsHandlerMap, SkinCategory.Cover),
+                    dummy.skinsManager?.skinAddressableLibrary, CoverExtras.LocalLook(), null);
             }
 
             foreach (var visual in _menuVisuals)
@@ -121,6 +123,7 @@ namespace CharmReplacer
                     catch (Exception ex) { Plugin.Log.LogWarning($"[NativeMenu] Menu phone {category} error: {ex.Message}"); }
                 }
                 CapFlip.EvaluateLocal(FindHandler(visual, SkinCategory.AccessoryHead));
+                CoverExtras.Apply(FindHandler(visual, SkinCategory.Cover), visual.skinLibrary, CoverExtras.LocalLook(), null);
             }
         }
 
