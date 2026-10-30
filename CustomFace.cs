@@ -8,11 +8,12 @@ using UnityEngine;
 namespace CharmReplacer
 {
     /// <summary>
-    /// Shows Face.png on the local player's screen, whatever face skin is equipped. The game's face
-    /// shader (SG_PlayerNPCScreen) reads a 4x4 atlas and its animations (idle, blink, talking, caller,
-    /// broken) only pick the cell through _Row/_Column, so the image is repeated in every cell: any cell
-    /// they pick shows it, and the face stays still. The screen base is set to white because the shader
-    /// multiplies the face over it, so the image's own colours come through.
+    /// Shows Face.png on the local player's screen, whatever face skin is equipped, as a still image.
+    /// The game's face shader (SG_PlayerNPCScreen) treats its texture as a grey mask and lights the screen
+    /// itself, so a coloured image fed to it comes out washed out and inverted (a black background shows
+    /// as a light screen). The screen therefore gets an unlit material that shows the image's own colours.
+    /// Only if no unlit shader is in the build does it fall back to the face shader, with the image in
+    /// every cell of its 4x4 atlas (its animations only pick the cell through _Row/_Column).
     /// Local only: there is no face asset on the backend for other players to download.
     /// </summary>
     internal static class CustomFace
@@ -23,11 +24,20 @@ namespace CharmReplacer
 
         private static readonly int FaceTextureId = Shader.PropertyToID("_FaceTexture");
         private static readonly int BaseTextureId = Shader.PropertyToID("_BaseTexture");
+        private static readonly int BaseMapId = Shader.PropertyToID("_BaseMap");
+        private static readonly int MainTexId = Shader.PropertyToID("_MainTex");
+        private static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
+        private static readonly int ColorId = Shader.PropertyToID("_Color");
+        // Built-in fallbacks are in Unity's always-included shaders and render in URP's unlit pass.
+        private static readonly string[] s_unlitShaders =
+            { "Universal Render Pipeline/Unlit", "Unlit/Texture", "Sprites/Default", "UI/Default" };
 
         private static ConfigEntry<bool> _enabled;
         private static bool _loadAttempted;
         private static Texture2D _atlas;
         private static Texture2D _white;
+        private static Texture2D _image;
+        private static Material _unlit;
         private static Sprite _icon;
 
         private sealed class Swap
@@ -110,6 +120,7 @@ namespace CharmReplacer
 
         private static Material CloneFor(Material original)
         {
+            if (_unlit != null) return _unlit;
             if (_clones.TryGetValue(original.Pointer, out var clone) && clone != null) return clone;
             clone = UnityEngine.Object.Instantiate(original);
             clone.name = original.name + "_CharmReplacerFace";
@@ -122,6 +133,7 @@ namespace CharmReplacer
 
         private static bool IsOurClone(Material material)
         {
+            if (_unlit != null && _unlit.Pointer == material.Pointer) return true;
             foreach (var clone in _clones.Values)
                 if (clone != null && clone.Pointer == material.Pointer) return true;
             return false;
@@ -176,14 +188,19 @@ namespace CharmReplacer
                 _white.SetPixels32(white);
                 _white.Apply(false, true);
 
-                var iconTexture = new Texture2D(cell, cell, TextureFormat.RGBA32, false);
-                iconTexture.hideFlags = HideFlags.DontUnloadUnusedAsset;
-                iconTexture.SetPixels32(cellPixels);
-                iconTexture.Apply(false, true);
-                _icon = Sprite.Create(iconTexture, new Rect(0, 0, cell, cell), new Vector2(0.5f, 0.5f), 100f);
+                _image = new Texture2D(cell, cell, TextureFormat.RGBA32, true);
+                _image.name = "CharmReplacer_Face";
+                _image.hideFlags = HideFlags.DontUnloadUnusedAsset;
+                _image.wrapMode = TextureWrapMode.Clamp;
+                _image.SetPixels32(cellPixels);
+                _image.Apply(true, true);
+                _icon = Sprite.Create(_image, new Rect(0, 0, cell, cell), new Vector2(0.5f, 0.5f), 100f);
                 _icon.hideFlags = HideFlags.DontUnloadUnusedAsset;
 
-                Plugin.Log.LogInfo($"[Skin] ✓ Face.png loaded ({w}x{h}, atlas {size}x{size}).");
+                _unlit = CreateUnlitMaterial();
+                Plugin.Log.LogInfo(_unlit != null
+                    ? $"[Skin] ✓ Face.png loaded ({w}x{h}), shown unlit with '{_unlit.shader.name}'."
+                    : $"[Skin] ✓ Face.png loaded ({w}x{h}); no unlit shader in the build, using the face shader (colours may wash out).");
                 return true;
             }
             catch (Exception ex)
@@ -192,6 +209,24 @@ namespace CharmReplacer
                 _atlas = null;
                 return false;
             }
+        }
+
+        private static Material CreateUnlitMaterial()
+        {
+            foreach (var name in s_unlitShaders)
+            {
+                var shader = Shader.Find(name);
+                if (shader == null) continue;
+                var material = new Material(shader);
+                material.name = "CharmReplacer_FaceUnlit";
+                material.hideFlags = HideFlags.DontUnloadUnusedAsset;
+                if (material.HasProperty(BaseMapId)) material.SetTexture(BaseMapId, _image);
+                if (material.HasProperty(MainTexId)) material.SetTexture(MainTexId, _image);
+                if (material.HasProperty(BaseColorId)) material.SetColor(BaseColorId, Color.white);
+                if (material.HasProperty(ColorId)) material.SetColor(ColorId, Color.white);
+                return material;
+            }
+            return null;
         }
 
         // Bilinear resample; the image is stretched to the cell, as the screen shows one cell whole.

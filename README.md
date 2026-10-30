@@ -12,6 +12,8 @@
 - **Jump glow**: the **Jump** entry lights up your cover's side lines while your jump is available, on
   any cover, in the colour picked with the glow colour entry (red by default).
 - Your cover colour and jump glow are shown to other players with the mod.
+- **Custom face**: put a `Face.png` in the mod folder to show it on your phone's screen with its own
+  colours (a still image, visible to you only). Template and example in `Tuto_Templates/Face/`.
 - **Multiplayer Skins & Charms**: Your friends can see your custom skin and you can see theirs! Just place each other's files in the mod folder!
 - **Players without the mod** see the native skin you have selected in the menu, so pick one you like
   under your custom one.
