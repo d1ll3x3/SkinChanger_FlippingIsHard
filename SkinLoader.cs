@@ -40,6 +40,10 @@ namespace CharmReplacer
             }
         }
 
+        /// <summary>A PNG file's pixels, bottom-up (Unity's order).</summary>
+        public static Color32[] LoadPixels(string path, out int width, out int height) =>
+            DecodePng(File.ReadAllBytes(path), out width, out height);
+
         private static Color32[] DecodePng(byte[] data, out int width, out int height)
         {
             if (data.Length < 8 || !data.AsSpan(0, 8).SequenceEqual(s_pngSignature))
@@ -165,6 +169,33 @@ namespace CharmReplacer
                 }
                 case 4: { byte g = C(0); return new Color32(g, g, g, C(1)); }
                 default: return new Color32(C(0), C(1), C(2), C(3));
+            }
+        }
+
+        /// <summary>
+        /// A texture's pixels, bottom-up. The game's textures are GPU-only, so they are read back through a
+        /// RenderTexture (sRGB, so the bytes come back as authored).
+        /// </summary>
+        public static Color32[] ReadPixels(Texture source)
+        {
+            int w = source.width, h = source.height;
+            var rt = RenderTexture.GetTemporary(w, h, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+            var previous = RenderTexture.active;
+            try
+            {
+                Graphics.Blit(source, rt);
+                RenderTexture.active = rt;
+                var readable = new Texture2D(w, h, TextureFormat.RGBA32, false);
+                readable.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+                readable.Apply(false, false);
+                var pixels = readable.GetPixels32();
+                UnityEngine.Object.Destroy(readable);
+                return pixels;
+            }
+            finally
+            {
+                RenderTexture.active = previous;
+                RenderTexture.ReleaseTemporary(rt);
             }
         }
 

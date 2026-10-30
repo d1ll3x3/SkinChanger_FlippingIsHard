@@ -1,13 +1,7 @@
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.IL2CPP;
-using Il2CppInterop.Runtime;
 using Il2CppInterop.Runtime.Injection;
-using Il2CppInterop.Runtime.InteropTypes;
-using Il2CppInterop.Runtime.InteropTypes.Arrays;
-using UnityEngine;
-using UnityEngine.Networking;
-using UnityEngine.Rendering;
 using HarmonyLib;
 using System;
 using System.IO;
@@ -16,7 +10,7 @@ using System.Collections.Generic;
 
 namespace CharmReplacer;
 
-[BepInPlugin("com.dani.charmreplacer", "CharmReplacer", "1.6.0")]
+[BepInPlugin("com.dani.charmreplacer", "CharmReplacer", "1.7.0")]
 public class Plugin : BasePlugin
 {
     internal static new ManualLogSource Log;
@@ -43,6 +37,9 @@ public class Plugin : BasePlugin
         var customCharm = Config.Bind("NativeMenu", "CustomCharmEnabled", true,
             "Show your custom charm (hatbundle) to yourself and to players with the mod. Players without the mod see the charm selected in the game's menu.");
         SkinOverride.Init(customCover, customCharm);
+        var customFace = Config.Bind("NativeMenu", "CustomFaceEnabled", true,
+            "Show Face.png on your phone's screen, to yourself only (it stays still: no blinking or talking).");
+        CustomFace.Init(customFace);
 
         // --- Config: cover extras (CoverExtras) ---
         var jumpGlow = Config.Bind("NativeMenu", "JumpGlowEnabled", false,
@@ -75,74 +72,8 @@ public class Plugin : BasePlugin
             var applied = new List<string>();
             var skipped = new List<string>();
 
-            // --- PlayerCharms ---
-            var playerCharmsType = FindGameType("EHS.PlayerCharms") ?? FindGameType("PlayerCharms");
-            if (playerCharmsType != null)
-            {
-                var method = playerCharmsType.GetMethod("ChangeCharmClient",
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-                    ?? playerCharmsType.GetMethod("ChangeCharmClient",
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-
-                if (method != null)
-                {
-                    _harmony.Patch(method,
-                        postfix: new HarmonyMethod(typeof(CharmPatches), nameof(CharmPatches.ChangeCharmPostfix)));
-                    applied.Add("ChangeCharmClient");
-                }
-                else
-                {
-                    skipped.Add("ChangeCharmClient");
-                }
-            }
-            else
-            {
-                skipped.Add("PlayerCharms type");
-            }
-
-            // --- PlayerSkins ---
-            var playerSkinsType = FindGameType("EHS.PlayerSkins") ?? FindGameType("PlayerSkins");
-            if (playerSkinsType != null)
-            {
-                var methodSkin = playerSkinsType.GetMethod("ChangeSkinClient",
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-                    ?? playerSkinsType.GetMethod("ChangeSkinClient",
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-
-                if (methodSkin != null)
-                {
-                    _harmony.Patch(methodSkin,
-                        postfix: new HarmonyMethod(typeof(CharmPatches), nameof(CharmPatches.ChangeSkinPostfix)));
-                    applied.Add("ChangeSkinClient");
-                }
-                else
-                {
-                    skipped.Add("ChangeSkinClient");
-                }
-
-                var methodStart = playerSkinsType.GetMethod("Start",
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-                    ?? playerSkinsType.GetMethod("OnNetworkSpawn",
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-                    ?? playerSkinsType.GetMethod("OnStartClient",
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-
-                if (methodStart != null)
-                {
-                    _harmony.Patch(methodStart,
-                        postfix: new HarmonyMethod(typeof(PlayerSkinsPatches), nameof(PlayerSkinsPatches.StartPostfix)));
-                    applied.Add("PlayerSkins.Spawn");
-                }
-                // Not an error: just means this game version uses a different spawn hook.
-            }
-            else
-            {
-                skipped.Add("PlayerSkins type");
-            }
-
-            // --- v1.7+ unified skins/charms: EHS.Skins.PlayerSkins ---
-            // The old PlayerCharms/PlayerSkins classes were deleted in the v1.7 rework and
-            // merged into EHS.Skins.PlayerSkins, where a charm is just SkinCategory.Charm.
+            // --- EHS.Skins.PlayerSkins ---
+            // Since the v1.7 rework skins and charms are one system (a charm is SkinCategory.Charm).
             // Both apply paths (local + network) drive the same re-scan trigger.
             var skinsPlayerType = FindGameType("EHS.Skins.PlayerSkins");
             if (skinsPlayerType != null)
@@ -183,7 +114,14 @@ public class Plugin : BasePlugin
                         postfix: new HarmonyMethod(typeof(PlayerSkinsPatches), nameof(PlayerSkinsPatches.StartPostfix)));
                     applied.Add("Skins.PlayerSkins.Init");
                 }
-                // Not an error if absent: older versions use PlayerCharms/PlayerSkins above.
+                else
+                {
+                    skipped.Add("Skins.PlayerSkins.Init");
+                }
+            }
+            else
+            {
+                skipped.Add("EHS.Skins.PlayerSkins type");
             }
 
             // --- Native customization menu + per-viewer skin override ---
@@ -199,7 +137,7 @@ public class Plugin : BasePlugin
             }
 
             // --- DestroyedPhoneEffectHandler ---
-            var destroyedPhoneType = FindGameType("EHS.DestroyedPhoneEffectHandler") ?? FindGameType("DestroyedPhoneEffectHandler");
+            var destroyedPhoneType = FindGameType("EHS.DestroyedPhoneEffectHandler");
             if (destroyedPhoneType != null)
             {
                 var initMethod = destroyedPhoneType.GetMethod("Init",

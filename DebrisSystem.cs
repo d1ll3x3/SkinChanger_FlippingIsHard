@@ -7,7 +7,6 @@ namespace CharmReplacer
     internal static class DebrisSystem
     {
         // Cached reflection handles — populated on first phone-break, reused forever.
-        private static System.Type _handlerType;
         private static System.Reflection.PropertyInfo _piDefaultVisual;
         private static System.Reflection.PropertyInfo _piDestroyedVisual;
         private static System.Reflection.PropertyInfo _piLastSpawnedParts;
@@ -18,13 +17,11 @@ namespace CharmReplacer
             object handler, string name, ref System.Reflection.PropertyInfo cache)
         {
             if (cache != null) return cache;
-            var type = handler.GetType();
-            if (_handlerType == null) _handlerType = type;
-            cache = type.GetProperty(name);
+            cache = handler.GetType().GetProperty(name);
             return cache;
         }
 
-        private static int SkinRendererArray(Il2CppArrayBase<Renderer> renderers, string label, Texture2D targetTex, Texture2D targetEmission)
+        private static int SkinRendererArray(Il2CppArrayBase<Renderer> renderers, Texture2D targetTex, Texture2D targetEmission)
         {
             if (renderers == null || targetTex == null) return 0;
             int count = 0;
@@ -32,37 +29,8 @@ namespace CharmReplacer
             {
                 var ren = renderers[i];
                 if (ren == null) continue;
-                
-                var name = ren.gameObject.name;
-                if (name.IndexOf("charm", StringComparison.OrdinalIgnoreCase) >= 0) continue;
-
-                var sharedMats = ren.sharedMaterials;
-                if (sharedMats == null || sharedMats.Length == 0) continue;
-                
-                bool updated = false;
-                var newMats = new Il2CppReferenceArray<Material>(sharedMats.Length);
-                for (int m = 0; m < sharedMats.Length; m++)
-                {
-                    var mat = sharedMats[m];
-                    newMats[m] = mat;
-                    if (mat == null) continue;
-                    if (!SkinSystem.IsMaterialPhoneDefault(mat)) continue;
-                    
-                    var currentTex = mat.HasProperty("_MainTex") ? mat.GetTexture("_MainTex") : null;
-                    if (currentTex == targetTex) continue;
-                    
-                    var cloned = UnityEngine.Object.Instantiate(mat);
-                    if (cloned == null) continue;
-                    cloned.hideFlags = HideFlags.DontUnloadUnusedAsset;
-                    SkinSystem.ApplySkinTexture(cloned, targetTex, targetEmission);
-                    newMats[m] = cloned;
-                    updated = true;
-                    count++;
-                }
-                if (updated)
-                {
-                    ren.sharedMaterials = newMats;
-                }
+                if (ren.gameObject.name.IndexOf("charm", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                count += SkinSystem.PaintRenderer(ren, targetTex, targetEmission);
             }
             return count;
         }
@@ -79,13 +47,14 @@ namespace CharmReplacer
                 var piDV  = GetProp(handler, "defaultVisual",   ref _piDefaultVisual);
                 var piDVs = GetProp(handler, "destroyedVisual", ref _piDestroyedVisual);
 
-                foreach (var pi in new[] { piDV, piDVs })
+                for (int v = 0; v < 2; v++)
                 {
+                    var pi = v == 0 ? piDV : piDVs;
                     if (pi == null) continue;
                     var visualGo = pi.GetValue(handler) as GameObject;
                     if (visualGo == null) continue;
                     var visualRenderers = visualGo.GetComponentsInChildren<Renderer>(true);
-                    int cnt = SkinRendererArray(visualRenderers, pi.Name.ToUpper(), targetTex, targetEmission);
+                    int cnt = SkinRendererArray(visualRenderers, targetTex, targetEmission);
                     if (cnt > 0)
                         Plugin.Log.LogInfo($"[Skin-Pre] ✓ Visual '{pi.Name}' painted ({cnt} materiales).");
                 }
@@ -102,7 +71,7 @@ namespace CharmReplacer
                         var part = spawnedParts[i];
                         if (part == null) continue;
                         var renderers = part.GetComponentsInChildren<Renderer>(true);
-                        count += SkinRendererArray(renderers, $"SPAWNED_PART_{i}", targetTex, targetEmission);
+                        count += SkinRendererArray(renderers, targetTex, targetEmission);
                     }
                     if (count > 0)
                         Plugin.Log.LogInfo($"[Skin-Pre] ✓ {count} materials applied to flying debris instantly.");
@@ -118,7 +87,7 @@ namespace CharmReplacer
                         var prefab = prefabsList[i];
                         if (prefab == null) continue;
                         var prefabRenderers = prefab.GetComponentsInChildren<Renderer>(true);
-                        SkinRendererArray(prefabRenderers, $"PREFAB_DEBRIS_{i}", targetTex, targetEmission);
+                        SkinRendererArray(prefabRenderers, targetTex, targetEmission);
                     }
                 }
             }

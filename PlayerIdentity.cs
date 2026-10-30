@@ -1,26 +1,15 @@
 using System;
 using System.Collections.Generic;
+using EHS;
 using UnityEngine;
-using Il2CppInterop.Runtime;
 
 namespace CharmReplacer
 {
     internal static class PlayerIdentity
     {
-        private static bool _hasDumpedPlayerNetworked = false;
-        // GetPlayerNickname is called every scan tick per player; without this
-        // gate the info log floods at hundreds of lines per second once a
-        // remote player is in scene. Each unique (resolver, nickname) pair
-        // logs only on first observation.
-        private static readonly HashSet<string> _loggedNicknameResolutions = new HashSet<string>(StringComparer.Ordinal);
-
-        // Candidate property/field names to try for nickname (ordered by likelihood).
-        // Static readonly to avoid a new array allocation on every cache miss.
-        private static readonly string[] s_nicknameCandidates =
-        {
-            "NicknameSyncVar", "Nickname", "SteamName",
-            "Username", "PlayerName", "Name", "DisplayName"
-        };
+        // GetPlayerNickname is called every scan tick per player; each nickname logs only on first
+        // observation instead of flooding the log.
+        private static readonly HashSet<string> _loggedNicknames = new HashSet<string>(StringComparer.Ordinal);
 
         // --- Per-frame caches (cleared on scene change) ---
         private static int _cachedFrame = -1;
@@ -28,6 +17,8 @@ namespace CharmReplacer
         private static int _cachedLocalPlayerFrame = -1;
         private static GameObject _cachedLocalPlayer;
         private static readonly Dictionary<int, string> _nicknameCache = new Dictionary<int, string>();
+
+        private static PlayerNetworked GetNetworked(GameObject p) => p.GetComponent<PlayerNetworked>();
 
         public static string GetPlayerNickname(GameObject p)
         {
@@ -40,94 +31,16 @@ namespace CharmReplacer
 
             try
             {
-                var mbs = p.GetComponents<MonoBehaviour>();
-                MonoBehaviour netObj = null;
-                foreach (var mb in mbs)
-                {
-                    if (mb != null && mb.GetIl2CppType() != null && mb.GetIl2CppType().Name == "PlayerNetworked")
-                    {
-                        netObj = mb;
-                        break;
-                    }
-                }
+                var networked = GetNetworked(p);
+                var syncVar = networked != null ? networked.NicknameSyncVar : null;
+                string nick = syncVar != null ? syncVar.Value : null;
+                // Empty until the SyncVar arrives; not cached, so the next scan asks again.
+                if (string.IsNullOrEmpty(nick)) return string.Empty;
 
-                if (netObj != null)
-                {
-                    var il2CppType = netObj.GetIl2CppType();
-
-                    // Dump all members ONCE per session so we know the real structure
-                    if (!_hasDumpedPlayerNetworked)
-                    {
-                        _hasDumpedPlayerNetworked = true;
-                        Plugin.Log.LogDebug("[PlayerIdentity] === FIRST ENCOUNTER: Dumping PlayerNetworked members ===");
-                        DumpTypeMembers(il2CppType);
-                    }
-
-                    // Candidate property/field names to try (ordered by likelihood)
-                    foreach (var name in s_nicknameCandidates)
-                    {
-                        // --- Try as PROPERTY ---
-                        var prop = il2CppType.GetProperty(name);
-                        if (prop != null)
-                        {
-                            try
-                            {
-                                string propTypeName = "";
-                                try { propTypeName = prop.PropertyType?.Name ?? "?"; } catch { }
-
-                                var getter = prop.GetGetMethod();
-                                if (getter != null)
-                                {
-                                    var res = getter.Invoke(netObj, null);
-                                    if (res != null)
-                                    {
-                                        string str = TryExtractString(res, propTypeName);
-                                        if (!string.IsNullOrEmpty(str))
-                                        {
-                                            string key = "p:" + name + "=" + str;
-                                            if (_loggedNicknameResolutions.Add(key))
-                                                Plugin.Log.LogInfo($"[PlayerIdentity] + Nickname found via property '{name}': {str}");
-                                            _nicknameCache[instanceId] = str;
-                                            return str;
-                                        }
-                                        Plugin.Log.LogDebug($"[PlayerIdentity]   property '{name}' ({propTypeName}) returned empty/null string");
-                                    }
-                                }
-                            }
-                            catch { }
-                        }
-
-                        // --- Try as FIELD ---
-                        var field = il2CppType.GetField(name);
-                        if (field != null)
-                        {
-                            try
-                            {
-                                string fieldTypeName = "";
-                                try { fieldTypeName = field.FieldType?.Name ?? "?"; } catch { }
-
-                                var val = field.GetValue(netObj);
-                                if (val != null)
-                                {
-                                    string str = TryExtractString(val, fieldTypeName);
-                                    if (!string.IsNullOrEmpty(str))
-                                    {
-                                        string key = "f:" + name + "=" + str;
-                                        if (_loggedNicknameResolutions.Add(key))
-                                            Plugin.Log.LogInfo($"[PlayerIdentity] + Nickname found via field '{name}': {str}");
-                                        _nicknameCache[instanceId] = str;
-                                        return str;
-                                    }
-                                    Plugin.Log.LogDebug($"[PlayerIdentity]   field '{name}' ({fieldTypeName}) returned empty/null string");
-                                }
-                            }
-                            catch { }
-                        }
-                    }
-
-                    if (_loggedNicknameResolutions.Add("!none"))
-                        Plugin.Log.LogWarning("[PlayerIdentity] ! No valid nickname found in any candidate.");
-                }
+                if (_loggedNicknames.Add(nick))
+                    Plugin.Log.LogInfo($"[PlayerIdentity] + Nickname: {nick}");
+                _nicknameCache[instanceId] = nick;
+                return nick;
             }
             catch (Exception ex)
             {
@@ -136,23 +49,14 @@ namespace CharmReplacer
             return string.Empty;
         }
 
-        // Candidate property/field names for a Steam ID (ordered by likelihood).
-        // The game uses FishNet-style networking, so a numeric Steam ID is NOT
-        // guaranteed to be synced. This degrades to string.Empty when absent and
-        // RemoteSkinService falls back to matching by nickname.
-        private static readonly string[] s_steamIdCandidates =
-        {
-            "SteamId", "SteamID", "OwnerSteamId", "SteamIdSyncVar",
-            "OwnerId", "ClientId"
-        };
-
         private static readonly Dictionary<int, string> _steamIdCache = new Dictionary<int, string>();
+        private static readonly HashSet<int> _loggedSteamIds = new HashSet<int>();
 
         /// <summary>
-        /// Best-effort Steam ID extraction for a player. Returns string.Empty if the
-        /// game does not expose a numeric Steam ID on PlayerNetworked (matching then
-        /// falls back to nickname). The PlayerNetworked member dump logged on first
-        /// encounter (see DumpTypeMembers) confirms which member, if any, carries it.
+        /// SteamID64 of a player, or string.Empty when it can't be resolved (matching then falls back
+        /// to the nickname). The v1.7 release syncs no SteamID64 on PlayerNetworked: the local player's
+        /// own comes from Steamworks, everyone else's from the Steam lobby, which lists each member under
+        /// the same persona name NicknameSyncVar carries.
         /// </summary>
         public static string GetPlayerSteamId(GameObject p)
         {
@@ -161,65 +65,20 @@ namespace CharmReplacer
             if (_steamIdCache.TryGetValue(instanceId, out var cached))
                 return cached;
 
-            string result = string.Empty;
+            string result = null;
             try
             {
-                var mbs = p.GetComponents<MonoBehaviour>();
-                MonoBehaviour netObj = null;
-                foreach (var mb in mbs)
-                {
-                    if (mb != null && mb.GetIl2CppType() != null && mb.GetIl2CppType().Name == "PlayerNetworked")
-                    {
-                        netObj = mb;
-                        break;
-                    }
-                }
-
-                if (netObj != null)
-                {
-                    var il2CppType = netObj.GetIl2CppType();
-                    foreach (var name in s_steamIdCandidates)
-                    {
-                        var prop = il2CppType.GetProperty(name);
-                        if (prop != null)
-                        {
-                            try
-                            {
-                                var getter = prop.GetGetMethod();
-                                var res = getter?.Invoke(netObj, null);
-                                string id = TryExtractId(res);
-                                // Only accept a real SteamID64 — never a FishNet ClientId/OwnerId
-                                // (small ints), which would build a bad /asset/<id>/ URL (404).
-                                if (IsValidSteamId64(id)) { result = id; break; }
-                            }
-                            catch { }
-                        }
-
-                        var field = il2CppType.GetField(name);
-                        if (field != null)
-                        {
-                            try
-                            {
-                                var val = field.GetValue(netObj);
-                                string id = TryExtractId(val);
-                                if (IsValidSteamId64(id)) { result = id; break; }
-                            }
-                            catch { }
-                        }
-                    }
-                }
+                var networked = GetNetworked(p);
+                result = networked != null && networked.IsOwner
+                    ? Steamworks.SteamUser.GetSteamID().m_SteamID.ToString()
+                    : SteamIdFromLobby(GetPlayerNickname(p));
             }
             catch (Exception ex)
             {
                 Plugin.Log.LogDebug($"[PlayerIdentity] GetPlayerSteamId error: {ex.Message}");
             }
 
-            // The v1.7 release syncs no SteamID64 on PlayerNetworked, but the Steam lobby lists every
-            // member under the same persona name NicknameSyncVar carries.
-            if (string.IsNullOrEmpty(result))
-                result = SteamIdFromLobby(GetPlayerNickname(p));
-
-            if (string.IsNullOrEmpty(result))
+            if (!IsValidSteamId64(result))
             {
                 // A member can join the lobby after their player spawns: keep asking instead of caching the miss.
                 if (_loggedSteamIds.Add(instanceId))
@@ -241,20 +100,20 @@ namespace CharmReplacer
             try
             {
                 if (_steamManager == null)
-                    _steamManager = UnityEngine.Object.FindObjectOfType<EHS.Steam.SteamManager>();
+                    _steamManager = UnityEngine.Object.FindAnyObjectByType<EHS.Steam.SteamManager>(FindObjectsInactive.Exclude);
                 if (_steamManager == null) return null;
 
                 var lobby = _steamManager.CurrentLobbySteamId;
                 if (lobby.m_SteamID == 0UL) return null;
 
+                string wanted = nick.Trim();
                 int count = Steamworks.SteamMatchmaking.GetNumLobbyMembers(lobby);
                 for (int i = 0; i < count; i++)
                 {
                     var member = Steamworks.SteamMatchmaking.GetLobbyMemberByIndex(lobby, i);
                     string name = Steamworks.SteamFriends.GetFriendPersonaName(member);
-                    if (!string.Equals(name?.Trim(), nick.Trim(), StringComparison.OrdinalIgnoreCase)) continue;
-                    string id = member.m_SteamID.ToString();
-                    return IsValidSteamId64(id) ? id : null;
+                    if (!string.Equals(name?.Trim(), wanted, StringComparison.OrdinalIgnoreCase)) continue;
+                    return member.m_SteamID.ToString();
                 }
             }
             catch (Exception ex)
@@ -264,132 +123,42 @@ namespace CharmReplacer
             return null;
         }
 
-        private static readonly HashSet<int> _loggedSteamIds = new HashSet<int>();
-
         /// <summary>A valid SteamID64 is 17 digits in the public-account range (starts 7656119…).</summary>
         public static bool IsValidSteamId64(string s)
         {
             if (string.IsNullOrEmpty(s) || s.Length != 17) return false;
             for (int i = 0; i < s.Length; i++)
                 if (s[i] < '0' || s[i] > '9') return false;
-            return s.StartsWith("7656");
+            return s.StartsWith("7656", StringComparison.Ordinal);
         }
 
-        /// <summary>
-        /// Extract a numeric id (Steam IDs are 64-bit) from an Il2Cpp object, unwrapping
-        /// a SyncVar/NetworkVar wrapper if needed. Returns null when not a usable number.
-        /// </summary>
-        private static string TryExtractId(Il2CppSystem.Object obj)
-        {
-            if (obj == null) return null;
-            try
-            {
-                // Direct unbox attempts for the common integer widths.
-                try { var v = obj.Unbox<ulong>(); if (v != 0) return v.ToString(); } catch { }
-                try { var v = obj.Unbox<long>();  if (v != 0) return v.ToString(); } catch { }
-                try { var v = obj.Unbox<uint>();  if (v != 0) return v.ToString(); } catch { }
-
-                // SyncVar/NetworkVar<T> wrapper: read .Value then recurse once.
-                var objType = obj.GetIl2CppType();
-                var valueProp = objType?.GetProperty("Value");
-                if (valueProp != null)
-                {
-                    var inner = valueProp.GetGetMethod()?.Invoke(obj, null);
-                    if (inner != null && inner.Pointer != obj.Pointer)
-                    {
-                        try { var v = inner.Unbox<ulong>(); if (v != 0) return v.ToString(); } catch { }
-                        try { var v = inner.Unbox<long>();  if (v != 0) return v.ToString(); } catch { }
-                    }
-                }
-            }
-            catch { }
-            return null;
-        }
-
-        /// <summary>
-        /// Try to extract a managed string from an Il2Cpp object.
-        /// If the object itself is a string, extract it directly.
-        /// If it's a SyncVar&lt;string&gt; or similar wrapper, try .Value property.
-        /// </summary>
-        private static string TryExtractString(Il2CppSystem.Object obj, string typeName)
-        {
-            if (obj == null) return null;
-
-            // 1) Direct string extraction
-            string direct = IL2CPP.Il2CppStringToManaged(obj.Pointer);
-            if (!string.IsNullOrEmpty(direct) && direct[0] != '\0')
-                return direct;
-
-            // 2) If it looks like a SyncVar wrapper, try .Value
-            if (typeName.Contains("SyncVar") || typeName.Contains("NetworkVar"))
-            {
-                try
-                {
-                    var objType = obj.GetIl2CppType();
-                    if (objType != null)
-                    {
-                        var valueProp = objType.GetProperty("Value");
-                        if (valueProp != null)
-                        {
-                            var getter = valueProp.GetGetMethod();
-                            if (getter != null)
-                            {
-                                var inner = getter.Invoke(obj, null);
-                                if (inner != null)
-                                {
-                                    string innerStr = IL2CPP.Il2CppStringToManaged(inner.Pointer);
-                                    if (!string.IsNullOrEmpty(innerStr) && innerStr[0] != '\0')
-                                        return innerStr;
-                                }
-                            }
-                        }
-                        // Also try .Value field
-                        var valueField = objType.GetField("Value");
-                        if (valueField != null)
-                        {
-                            var inner = valueField.GetValue(obj);
-                            if (inner != null)
-                            {
-                                string innerStr = IL2CPP.Il2CppStringToManaged(inner.Pointer);
-                                if (!string.IsNullOrEmpty(innerStr) && innerStr[0] != '\0')
-                                    return innerStr;
-                            }
-                        }
-                    }
-                }
-                catch { }
-            }
-
-            return null;
-        }
-
-        public static System.Collections.Generic.List<GameObject> GetAllPlayers()
+        public static List<GameObject> GetAllPlayers()
         {
             // Frame-cached: FindObjectsOfType is expensive; reuse result within the same frame
             int currentFrame = Time.frameCount;
             if (_cachedFrame == currentFrame && _cachedAllPlayers != null)
                 return _cachedAllPlayers;
 
-            var list = new System.Collections.Generic.List<GameObject>();
+            var list = new List<GameObject>();
             try
             {
                 var tagged = GameObject.FindGameObjectsWithTag("Player");
                 if (tagged != null) list.AddRange(tagged);
 
-                // Only do the expensive MonoBehaviour scan when the tag-based search found nothing.
-                // In a running game players are properly tagged, so this avoids iterating
-                // every MonoBehaviour in the scene on every cache miss.
+                // Untagged players: only searched when the tag found nothing (always the case in the
+                // main menu, which this runs in every second).
                 if (list.Count == 0)
                 {
-                    var networked = UnityEngine.Object.FindObjectsOfType<MonoBehaviour>();
-                    foreach (var n in networked)
-                    {
-                        if (n != null && n.GetIl2CppType() != null && n.GetIl2CppType().Name == "PlayerNetworked")
-                            list.Add(n.gameObject);
-                    }
+                    var networked = UnityEngine.Object.FindObjectsByType<PlayerNetworked>(FindObjectsSortMode.None);
+                    if (networked != null)
+                        foreach (var n in networked)
+                            if (n != null) list.Add(n.gameObject);
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogDebug($"[PlayerIdentity] GetAllPlayers error: {ex.Message}");
+            }
 
             _cachedFrame = currentFrame;
             _cachedAllPlayers = list;
@@ -407,47 +176,23 @@ namespace CharmReplacer
             _steamIdCache.Clear();
         }
 
-        public static bool IsLocalPlayer(GameObject p)
+        private static bool IsLocalPlayer(GameObject p)
         {
             if (p == null) return false;
-            try
-            {
-                var cam = p.GetComponentInChildren<Camera>(false);
-                if (cam != null && cam.isActiveAndEnabled) return true;
+            var cam = p.GetComponentInChildren<Camera>(false);
+            if (cam != null && cam.isActiveAndEnabled) return true;
 
-                var mbs = p.GetComponents<MonoBehaviour>();
-                foreach (var mb in mbs)
-                {
-                    if (mb == null) continue;
-                    var typeObj = mb.GetIl2CppType();
-                    if (typeObj != null)
-                    {
-                        var isOwnerProp = typeObj.GetProperty("IsOwner");
-                        if (isOwnerProp != null)
-                        {
-                            var method = isOwnerProp.GetGetMethod();
-                            if (method != null)
-                            {
-                                var res = method.Invoke(mb, null);
-                                if (res != null)
-                                {
-                                    var unboxed = res.Unbox<bool>();
-                                    if (unboxed) return true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            catch { }
-            return false;
+            // FishNet ownership of the player's network object.
+            var networked = GetNetworked(p);
+            return networked != null && networked.IsOwner;
         }
 
         public static GameObject GetLocalPlayerGO()
         {
-            // Frame-cached: IsLocalPlayer uses GetComponents + reflection; reuse within same frame.
+            // Frame-cached, misses included: before ownership resolves every scan of the frame would
+            // otherwise repeat the search.
             int currentFrame = Time.frameCount;
-            if (_cachedLocalPlayerFrame == currentFrame && _cachedLocalPlayer != null)
+            if (_cachedLocalPlayerFrame == currentFrame)
                 return _cachedLocalPlayer;
 
             GameObject result = null;
@@ -468,64 +213,22 @@ namespace CharmReplacer
                 // via the charm slot being marked, blocks the remote player's own physics).
                 // With more than one player we return null and let the caller retry until
                 // IsOwner resolves.
-                if (result == null && allPlayers.Count == 1 && Camera.main != null)
+                if (result == null && allPlayers.Count == 1)
                 {
+                    var cam = Camera.main;
                     var p = allPlayers[0];
-                    if (p != null && Vector3.Distance(p.transform.position, Camera.main.transform.position) <= 10f)
+                    if (cam != null && p != null && Vector3.Distance(p.transform.position, cam.transform.position) <= 10f)
                         result = p;
-                }
-            }
-            catch { }
-
-            _cachedLocalPlayerFrame = currentFrame;
-            _cachedLocalPlayer = result;
-            return result;
-        }
-
-        private static void DumpTypeMembers(Il2CppSystem.Type il2CppType)
-        {
-            try
-            {
-                var bf = Il2CppSystem.Reflection.BindingFlags.Public
-                       | Il2CppSystem.Reflection.BindingFlags.NonPublic
-                       | Il2CppSystem.Reflection.BindingFlags.Instance
-                       | Il2CppSystem.Reflection.BindingFlags.Static;
-
-                var props = il2CppType.GetProperties(bf);
-                if (props != null)
-                {
-                    Plugin.Log.LogDebug($"[PlayerIdentity] --- Properties ({props.Length}) ---");
-                    foreach (var propItem in props)
-                    {
-                        try
-                        {
-                            string propTypeName = "";
-                            try { propTypeName = propItem.PropertyType?.Name ?? "?"; } catch { propTypeName = "?"; }
-                            Plugin.Log.LogDebug($"[PlayerIdentity]   Property: {propItem.Name} : {propTypeName}");
-                        }
-                        catch { }
-                    }
-                }
-                var fields = il2CppType.GetFields(bf);
-                if (fields != null)
-                {
-                    Plugin.Log.LogDebug($"[PlayerIdentity] --- Fields ({fields.Length}) ---");
-                    foreach (var fieldItem in fields)
-                    {
-                        try
-                        {
-                            string fieldTypeName = "";
-                            try { fieldTypeName = fieldItem.FieldType?.Name ?? "?"; } catch { fieldTypeName = "?"; }
-                            Plugin.Log.LogDebug($"[PlayerIdentity]   Field: {fieldItem.Name} : {fieldTypeName}");
-                        }
-                        catch { }
-                    }
                 }
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning($"[PlayerIdentity] DumpTypeMembers error: {ex.Message}");
+                Plugin.Log.LogDebug($"[PlayerIdentity] GetLocalPlayerGO error: {ex.Message}");
             }
+
+            _cachedLocalPlayerFrame = currentFrame;
+            _cachedLocalPlayer = result;
+            return result;
         }
     }
 }

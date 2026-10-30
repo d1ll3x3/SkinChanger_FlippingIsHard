@@ -8,35 +8,9 @@ namespace CharmReplacer;
 
 internal static class CharmPatches
 {
-    // ChangeCharmClient / ChangeSkinClient run on the game thread. Doing the
-    // full sync rescan here stalls the frame (visible lag on paint-bucket use).
-    // Invalidate the renderer cache and let the per-frame fast poll do the work.
-    public static void ChangeCharmPostfix()
-    {
-        try
-        {
-            // Charm changes do not invalidate skin renderers. Only the charm
-            // mesh cache (CharmedMeshFilterIds) needs a refresh, which is
-            // handled by the fast poll + TryApplyCharmToMeshFilters.
-            CharmReplacerBehavior.Instance?.RequestGameFastPoll();
-        }
-        catch (Exception ex) { Plugin.Log.LogError($"[Charm] ChangeCharm postfix error: {ex}"); }
-    }
-
-    public static void ChangeSkinPostfix()
-    {
-        try
-        {
-            CharmState.SkinnedRendererIds.Clear();
-            CharmReplacerBehavior.Instance?.RequestGameFastPoll();
-        }
-        catch (Exception ex) { Plugin.Log.LogError($"[Skin] ChangeSkin postfix error: {ex}"); }
-    }
-
-    // v1.7+ (EHS.Skins rework): charms and skins are one unified system, so a single
-    // ApplyLocalSkin / ApplySkinFromNetwork call can change either. We don't read the
-    // SkinCategory arg here, so refresh BOTH caches and let the per-frame fast poll
-    // re-apply. Re-swap churn is bounded by the ReswapCooldown in CharmSystem.
+    // ApplyLocalSkin / ApplySkinFromNetwork run on the game thread, where a full sync rescan stalls
+    // the frame. Either can change a cover or a charm (one system since v1.7) and the category isn't
+    // read, so both caches are invalidated and the per-frame fast poll re-applies.
     public static void SkinAppliedPostfix()
     {
         try
@@ -51,11 +25,12 @@ internal static class CharmPatches
 
 internal static class PlayerSkinsPatches
 {
-    // Fires when a new player joins mid-game.
-    public static void StartPostfix()
+    // PlayerSkins.Init: fires when a player (local or remote) spawns, also mid-game.
+    public static void StartPostfix(PlayerSkins __instance)
     {
         try
         {
+            SkinOverride.Register(__instance);
             CharmReplacerBehavior.Instance?.RequestGameFastPoll();
         }
         catch (Exception ex) { Plugin.Log.LogError($"[Skin] PlayerSkins.Start postfix error: {ex}"); }
@@ -101,13 +76,14 @@ internal static class DestroyedPhoneEffectHandlerPatches
         }
     }
 
-    // Sync paint needed: pieces must be skinned before the destroy animation plays.
+    // Sync paint of this phone's pieces only: they must be skinned before the destroy animation
+    // plays. Init runs on every (re)spawn, so the full player rescan is left to the next frames.
     public static void InitPostfix(Il2CppObjectBase __instance)
     {
         try
         {
-            CharmReplacerBehavior.Instance?.TriggerImmediateReplacement();
             PrePaintDestroyedPhone(__instance);
+            CharmReplacerBehavior.Instance?.RequestGameFastPoll();
         }
         catch (Exception ex) { Plugin.Log.LogError($"[Patch] InitPostfix error: {ex}"); }
     }

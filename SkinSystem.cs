@@ -2,24 +2,29 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
-using Il2CppInterop.Runtime.InteropTypes.Arrays;
 
 namespace CharmReplacer
 {
     internal static class SkinSystem
     {
+        private static readonly string[] s_baseMapProps = { "_MainTex", "_BaseMap", "_BaseColorMap" };
+        private static readonly string[] s_tintProps = { "_Color", "_Tint", "_BaseColor", "_LineColor" };
+        private static readonly string[] s_emissionColorProps = { "_EmissionColor", "_EmissiveColor" };
+        private static readonly string[] s_emissionFloatProps =
+            { "_EmissionIntensity", "_EmissiveIntensity", "_EmissionStrength", "_EmissionPower", "_UseEmission", "_EnableEmission" };
+
         public static void ApplySkinTexture(Material mat, Texture baseTex, Texture emissionTex)
         {
             _paintedEmission[mat.GetInstanceID()] = emissionTex != null ? emissionTex.GetInstanceID() : 0;
 
-            foreach (string propName in new[] { "_MainTex", "_BaseMap", "_BaseColorMap" })
+            foreach (string propName in s_baseMapProps)
             {
                 if (mat.HasProperty(propName))
                     mat.SetTexture(propName, baseTex);
             }
 
             // Force the base color to white so the game's default tint doesn't overwrite or hide our custom texture
-            foreach (string propName in new[] { "_Color", "_Tint", "_BaseColor", "_LineColor" })
+            foreach (string propName in s_tintProps)
             {
                 if (mat.HasProperty(propName))
                     mat.SetColor(propName, Color.white);
@@ -27,19 +32,19 @@ namespace CharmReplacer
 
             if (emissionTex == null) return;
 
-            foreach (string propName in new[] { "_EmissionMap", "_EmissiveColorMap", "_EmissionTex", "_EmissionMask" })
+            foreach (string propName in s_emissionMapProps)
             {
                 if (mat.HasProperty(propName))
                     mat.SetTexture(propName, emissionTex);
             }
 
-            foreach (string propName in new[] { "_EmissionColor", "_EmissiveColor" })
+            foreach (string propName in s_emissionColorProps)
             {
                 if (mat.HasProperty(propName))
                     mat.SetColor(propName, Color.white * 2.0f);
             }
 
-            foreach (string propName in new[] { "_EmissionIntensity", "_EmissiveIntensity", "_EmissionStrength", "_EmissionPower", "_UseEmission", "_EnableEmission" })
+            foreach (string propName in s_emissionFloatProps)
             {
                 if (mat.HasProperty(propName))
                     mat.SetFloat(propName, 1.0f);
@@ -70,9 +75,13 @@ namespace CharmReplacer
         // done and every scan cloned it again (log: "8 phone source material(s) updated" per scan).
         private static readonly Dictionary<int, int> _paintedEmission = new Dictionary<int, int>();
 
+        // Textures (base, emission) each player's break effect was pre-painted with, by handler.
+        private static readonly Dictionary<IntPtr, (int, int)> _debrisPainted = new Dictionary<IntPtr, (int, int)>();
+
         /// <summary>Clear all per-scene material caches. Call from OnSceneLoaded.</summary>
         public static void ClearMaterialCache()
         {
+            _debrisPainted.Clear();
             _materialPhoneDefaultCache.Clear();
             _shaderEmissionPropCache.Clear();
             _paintedEmission.Clear();
@@ -128,9 +137,11 @@ namespace CharmReplacer
             }
         }
 
-        // Strict whitelist: only the default phone material is replaced. Cosmetic
-        // variants (M_Phone_MissElephant, M_Phone_Base_Gold, M_Phone_Basic_Green, etc.)
-        // are left untouched so the game's skin selector still works.
+        // Strict whitelist: only the default exterior cover is replaced. Equipped cover skins
+        // (M_Phone_<name>) are left untouched so the game's skin selector still works, and so is
+        // M_Skin_Inside_Default (base/battery, visible when the phone breaks).
+        private const string CoverMaterialName = "M_Skin_Cover_Default";
+
         public static bool IsMaterialPhoneDefault(Material mat)
         {
             if (mat == null) return false;
@@ -139,128 +150,17 @@ namespace CharmReplacer
             if (_materialPhoneDefaultCache.TryGetValue(matId, out bool cached))
                 return cached;
 
-            bool result = IsMaterialPhoneDefaultCore(mat);
+            // Tolerates the "(Clone)" / "(Instance)" / " (1)" suffix of the game's runtime copies.
+            string name = mat.name ?? string.Empty;
+            bool result = name.StartsWith(CoverMaterialName, StringComparison.OrdinalIgnoreCase)
+                && (name.Length == CoverMaterialName.Length
+                    || name[CoverMaterialName.Length] == ' ' || name[CoverMaterialName.Length] == '(');
             _materialPhoneDefaultCache[matId] = result;
             return result;
         }
 
-        // Matches a material name to a default-phone name, tolerating a runtime "(Clone)" / "(Instance)"
-        // or " (1)" suffix (the game clones phone materials at runtime via MaterialHandler2).
-        private static bool MatchesDefaultPhoneName(string matName, string defaultName)
-        {
-            if (matName == defaultName) return true;
-            if (matName.StartsWith(defaultName) &&
-                matName.Length > defaultName.Length &&
-                (matName[defaultName.Length] == ' ' || matName[defaultName.Length] == '(')) return true;
-            return false;
-        }
-
-        private static bool IsMaterialPhoneDefaultCore(Material mat)
-        {
-            if (mat == null) return false;
-            string matName = (mat.name ?? string.Empty).ToLowerInvariant();
-
-            // Default phone surface we repaint: ONLY the exterior cover/casing.
-            //   v1.7 rework: M_Skin_Cover_Default (front cover, shader "Elegant Horse Studios/SG_Player_MSAO").
-            //   Legacy (<= 0.12): m_phone_basic_default.
-            // NOT M_Skin_Inside_Default (base/battery = interior, visible when the phone breaks) — it is
-            // deliberately left to fall through to the "inside" hard-reject below.
-            if (MatchesDefaultPhoneName(matName, "m_phone_basic_default")) return true;
-            if (MatchesDefaultPhoneName(matName, "m_skin_cover_default")) return true;
-
-            // Hard rejects (screens, internals, outlines).
-            if (matName.Contains("screen") || matName.Contains("display") || matName.Contains("glass")) return false;
-            if (matName.Contains("inside")) return false;
-            if (matName.Contains("outline")) return false;
-
-            // Old version (0.9.15): the local player's currently-equipped phone material
-            // has no asset name and uses the shader "Elegant Horse Studios/SG_Player_MSAO".
-            // ALL cosmetics in old version share this shader and look identical by name,
-            // so we can only tell them apart by their _MainTex. Accept only when the
-            // texture matches the captured default OR is already our custom skin.
-            bool isShaderFallback = matName.Contains("sg_player_msao");
-            if (!isShaderFallback && string.IsNullOrEmpty(mat.name))
-            {
-                try
-                {
-                    var shader = mat.shader;
-                    if (shader != null)
-                    {
-                        string shaderName = (shader.name ?? string.Empty).ToLowerInvariant();
-                        if (shaderName.Contains("sg_player_msao")) isShaderFallback = true;
-                    }
-                }
-                catch { }
-            }
-
-            if (isShaderFallback)
-            {
-                var tex = mat.HasProperty("_MainTex") ? mat.GetTexture("_MainTex") : null;
-
-                // Already our painted clone — let the caller's currentTex == targetTex
-                // check downstream short-circuit, but don't reject it here.
-                if (tex != null && tex == CharmState.CustomSkinTexture) return true;
-
-                // The texture is the captured default phone texture → user is on Default cosmetic.
-                if (CharmState.DefaultPhoneTexture != null && tex == CharmState.DefaultPhoneTexture) return true;
-
-                // Default not captured yet → allow first-pass paint so we don't miss the
-                // initial skin application. The pre-pass in TryApplySkinToPhoneSourceMaterials
-                // should populate DefaultPhoneTexture before this branch runs in practice.
-                if (CharmState.DefaultPhoneTexture == null) return true;
-
-                // Different texture → it's a non-default cosmetic. Leave it alone.
-                return false;
-            }
-
-            return false;
-        }
-
-        // One-shot capture of the game's default phone texture from any
-        // M_Phone_Basic_Default material currently present in the scene. v4_Base_LOD
-        // renderers always carry this material regardless of equipped cosmetic.
-        private static void CaptureDefaultPhoneTextureIfNeeded(GameObject player)
-        {
-            if (CharmState.DefaultPhoneTexture != null) return;
-            if (player == null) return;
-
-            const string defaultName = "m_phone_basic_default";
-            var renderers = player.GetComponentsInChildren<Renderer>(true);
-            if (renderers == null) return;
-
-            for (int i = 0; i < renderers.Length; i++)
-            {
-                var ren = renderers[i];
-                if (ren == null) continue;
-                var mats = ren.sharedMaterials;
-                if (mats == null) continue;
-                for (int m = 0; m < mats.Length; m++)
-                {
-                    var mat = mats[m];
-                    if (mat == null) continue;
-                    string mn = (mat.name ?? string.Empty).ToLowerInvariant();
-                    if (mn != defaultName &&
-                        !(mn.StartsWith(defaultName) && mn.Length > defaultName.Length &&
-                          (mn[defaultName.Length] == ' ' || mn[defaultName.Length] == '('))) continue;
-
-                    if (!mat.HasProperty("_MainTex")) continue;
-                    var tex = mat.GetTexture("_MainTex");
-                    if (tex == null) continue;
-                    if (tex == CharmState.CustomSkinTexture) continue;
-
-                    CharmState.DefaultPhoneTexture = tex;
-                    if (!CharmState.DefaultPhoneTextureLogged)
-                    {
-                        Plugin.Log.LogDebug($"[Skin] ✓ Default phone texture captured: '{tex.name}'");
-                        CharmState.DefaultPhoneTextureLogged = true;
-                    }
-                    return;
-                }
-            }
-        }
-
         // Emission map property names ApplySkinTexture writes to. Shared so the
-        // re-skin guard checks the same slots the painter sets.
+        // repaint check reads the same slots the painter sets.
         private static readonly string[] s_emissionMapProps =
             { "_EmissionMap", "_EmissiveColorMap", "_EmissionTex", "_EmissionMask" };
 
@@ -273,25 +173,6 @@ namespace CharmReplacer
             {
                 if (m.HasProperty(propName) && m.GetTexture(propName) == target)
                     return true;
-            }
-            return false;
-        }
-
-        private static bool RendererNeedsReSkin(Renderer ren, Texture2D targetTex, Texture2D targetEmission)
-        {
-            if (ren == null) return true;
-            var mats = ren.sharedMaterials;
-            if (mats == null) return false;
-            foreach (var m in mats)
-            {
-                if (m == null) continue;
-                if (!IsMaterialPhoneDefault(m)) continue;
-                var currentTex = m.HasProperty("_MainTex") ? m.GetTexture("_MainTex") : null;
-                if (currentTex != targetTex) return true;
-                // Emission arrives a moment after the base skin for remote players;
-                // without this the renderer is marked "known" and the later-arriving
-                // emission map is never applied.
-                if (targetEmission != null && !EmissionApplied(m, targetEmission)) return true;
             }
             return false;
         }
@@ -334,84 +215,33 @@ namespace CharmReplacer
 
                     if (targetTex == null) continue;
 
-                    // Capture the game's default phone texture once per session so the
-                    // old-version shader-fallback branch can distinguish Default from
-                    // other cosmetics by _MainTex identity.
-                    CaptureDefaultPhoneTextureIfNeeded(p);
-
-                    // Pre-paint physics handler synchronously if it exists on the player
-                    try
+                    // Pre-paint the break effect so its pieces already carry the skin. Once per handler and
+                    // texture: it walks every debris prefab, and the break patches repaint it anyway.
+                    var debris = p.GetComponent<EHS.DestroyedPhoneEffectHandler>();
+                    if (debris != null)
                     {
-                        var allMbs = p.GetComponents<MonoBehaviour>();
-                        foreach (var mb in allMbs)
+                        var painted = (targetTex.GetInstanceID(), targetEmission != null ? targetEmission.GetInstanceID() : 0);
+                        if (!_debrisPainted.TryGetValue(debris.Pointer, out var last) || last != painted)
                         {
-                            if (mb == null) continue;
-                            string typeName = mb.GetIl2CppType()?.Name ?? "";
-                            if (typeName.Contains("DestroyedPhone") || typeName.Contains("Debris") || typeName.Contains("BrokenPhone"))
-                            {
-                                DebrisSystem.SkinDestroyedPhoneHandler(mb, targetTex, targetEmission);
-                            }
+                            DebrisSystem.SkinDestroyedPhoneHandler(debris, targetTex, targetEmission);
+                            _debrisPainted[debris.Pointer] = painted;
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        Plugin.Log.LogWarning($"[Skin-Pre] Error pre-painting from scanner: {ex.Message}");
                     }
 
                     var renderers = p.GetComponentsInChildren<Renderer>(true);
-                    if (renderers == null || renderers.Length == 0) continue;
+                    if (renderers == null) continue;
 
                     for (int i = 0; i < renderers.Length; i++)
                     {
                         var ren = renderers[i];
                         if (ren == null) continue;
 
-                        bool isKnown = CharmState.SkinnedRendererIds.Contains(ren.GetInstanceID());
-                        if (isKnown)
-                        {
-                            if (!RendererNeedsReSkin(ren, targetTex, targetEmission)) continue;
-                            CharmState.SkinnedRendererIds.Remove(ren.GetInstanceID());
-                        }
-
-                        var sharedMats = ren.sharedMaterials;
-                        if (sharedMats == null || sharedMats.Length == 0) continue;
-
-                        bool rendererUpdated = false;
-                        var newMats = new Il2CppReferenceArray<Material>(sharedMats.Length);
-
-                        for (int m = 0; m < sharedMats.Length; m++)
-                        {
-                            var mat = sharedMats[m];
-                            newMats[m] = mat;
-
-                            if (mat == null) continue;
-                            if (!IsMaterialPhoneDefault(mat)) continue;
-
-                            // Repaint when EITHER the base texture or the emission map is not yet
-                            // applied. Checking only the base would skip a material whose base is
-                            // already correct but whose emission arrived later (remote assets come
-                            // in sequentially: base first, emission a moment after) — that was the
-                            // "others' emission only after restart" bug.
-                            var currentTex = mat.HasProperty("_MainTex") ? mat.GetTexture("_MainTex") : null;
-                            bool baseOk = currentTex == targetTex;
-                            bool emissionOk = targetEmission == null || EmissionApplied(mat, targetEmission);
-                            if (baseOk && emissionOk) continue;
-
-                            var clonedMat = UnityEngine.Object.Instantiate(mat);
-                            if (clonedMat == null) continue;
-                            clonedMat.hideFlags = HideFlags.DontUnloadUnusedAsset;
-
-                            ApplySkinTexture(clonedMat, targetTex, targetEmission);
-                            newMats[m] = clonedMat;
-                            rendererUpdated = true;
-                            replaced++;
-                        }
-
-                        if (rendererUpdated)
-                        {
-                            ren.sharedMaterials = newMats;
-                            CharmState.SkinnedRendererIds.Add(ren.GetInstanceID());
-                        }
+                        // Repaints when EITHER the base texture or the emission map is missing: remote
+                        // assets arrive sequentially (base first, emission a moment after).
+                        int painted = PaintRenderer(ren, targetTex, targetEmission);
+                        if (painted == 0) continue;
+                        CharmState.SkinnedRendererIds.Add(ren.GetInstanceID());
+                        replaced += painted;
                     }
 
                     // Replaced > 0 is summarised by DoScanAndReplace's per-call counter.
@@ -456,22 +286,17 @@ namespace CharmReplacer
         /// Paints the exterior cover materials of one renderer with a clone carrying the texture.
         /// Materials already carrying it (base and emission) are left alone, so repeated calls are cheap.
         /// </summary>
-        private static int PaintRenderer(Renderer ren, Texture2D tex, Texture2D emission)
+        internal static int PaintRenderer(Renderer ren, Texture2D tex, Texture2D emission)
         {
-            var sharedMats = ren.sharedMaterials;
-            if (sharedMats == null || sharedMats.Length == 0) return 0;
+            // The getter hands back a copy, so it is edited in place and assigned only when changed.
+            var mats = ren.sharedMaterials;
+            if (mats == null) return 0;
 
             int painted = 0;
-            var newMats = new Il2CppReferenceArray<Material>(sharedMats.Length);
-            for (int m = 0; m < sharedMats.Length; m++)
+            for (int m = 0; m < mats.Length; m++)
             {
-                var mat = sharedMats[m];
-                newMats[m] = mat;
-                if (mat == null) continue;
-
-                // Only the exterior phone cover — same specific matcher used in-game. No broad
-                // heuristic here, so we don't repaint menu backgrounds/reflections.
-                if (!IsMaterialPhoneDefault(mat)) continue;
+                var mat = mats[m];
+                if (mat == null || !IsMaterialPhoneDefault(mat)) continue;
 
                 var currentTex = mat.HasProperty("_MainTex") ? mat.GetTexture("_MainTex") : null;
                 if (currentTex == tex && (emission == null || EmissionApplied(mat, emission))) continue;
@@ -480,11 +305,15 @@ namespace CharmReplacer
                 if (clonedMat == null) continue;
                 clonedMat.hideFlags = HideFlags.DontUnloadUnusedAsset;
                 ApplySkinTexture(clonedMat, tex, emission);
-                newMats[m] = clonedMat;
+                mats[m] = clonedMat;
                 painted++;
             }
 
-            if (painted > 0) ren.sharedMaterials = newMats;
+            if (painted > 0)
+            {
+                ren.sharedMaterials = mats;
+                CoverExtras.Invalidate();
+            }
             return painted;
         }
 
@@ -508,46 +337,5 @@ namespace CharmReplacer
             }
             return painted;
         }
-
-        public static int TryApplySkinToMainMenuPhonePreview()
-        {
-            if (!UnityEngine.SceneManagement.SceneManager.GetActiveScene().name.Contains("MainMenu")) return 0;
-            if (CharmState.CustomSkinTexture == null) return 0;
-            if (!SkinOverride.IsLocalEnabled(EHS.Skins.SkinCategory.Cover)) return 0;
-
-            int replaced = 0;
-            try
-            {
-                var renderers = UnityEngine.Object.FindObjectsOfType<Renderer>();
-                if (renderers == null) return 0;
-
-                for (int i = 0; i < renderers.Length; i++)
-                {
-                    var ren = renderers[i];
-                    if (ren == null) continue;
-
-                    int rendererId;
-                    try { rendererId = ren.GetInstanceID(); } catch { continue; }
-                    if (CharmState.MenuPreviewRendererIds.Contains(rendererId)) continue;
-
-                    int painted = PaintRenderer(ren, CharmState.CustomSkinTexture, CharmState.CustomSkinEmissionTexture);
-                    if (painted > 0)
-                    {
-                        CharmState.MenuPreviewRendererIds.Add(rendererId);
-                        replaced += painted;
-                    }
-                }
-
-                if (replaced > 0)
-                    Plugin.Log.LogInfo($"[Skin] ✓ Menu preview: painted {replaced} phone renderer(s).");
-            }
-            catch (Exception ex)
-            {
-                Plugin.Log.LogWarning($"[Skin] Error applying skin al preview del menu: {ex.Message}");
-            }
-
-            return replaced;
-        }
-
     }
 }

@@ -436,12 +436,14 @@ namespace CharmReplacer
                     extractedMesh.hideFlags = HideFlags.DontUnloadUnusedAsset;
 
                     var mr = bestGo.GetComponent<MeshRenderer>() ?? bestGo.GetComponentInChildren<MeshRenderer>(true);
-                    if (mr != null && mr.sharedMaterials != null && mr.sharedMaterials.Length > 0)
+                    // Each sharedMaterials read copies the array; read it once.
+                    var sourceMats = mr != null ? mr.sharedMaterials : null;
+                    if (sourceMats != null && sourceMats.Length > 0)
                     {
-                        var newMats = new Il2CppReferenceArray<Material>(mr.sharedMaterials.Length);
-                        for (int i = 0; i < mr.sharedMaterials.Length; i++)
+                        var newMats = new Il2CppReferenceArray<Material>(sourceMats.Length);
+                        for (int i = 0; i < sourceMats.Length; i++)
                         {
-                            var cloned = UnityEngine.Object.Instantiate(mr.sharedMaterials[i]);
+                            var cloned = UnityEngine.Object.Instantiate(sourceMats[i]);
                             cloned.hideFlags = HideFlags.DontUnloadUnusedAsset;
                             PrepareRuntimeMaterial(cloned);
                             newMats[i] = cloned;
@@ -497,7 +499,7 @@ namespace CharmReplacer
 
         /// <summary>Returns true if this GameObject name matches the phone charm slot we replace.</summary>
         private static bool IsExactPhoneCharm(string name) =>
-            !string.IsNullOrEmpty(name) && name.Contains("charm_phone");
+            !string.IsNullOrEmpty(name) && name.IndexOf("charm_phone", StringComparison.OrdinalIgnoreCase) >= 0;
 
         private static bool IsCharmTarget(GameObject go)
         {
@@ -505,31 +507,31 @@ namespace CharmReplacer
 
             try
             {
+                // Name match first: every MeshFilter of every player is tested on each scan, and only
+                // the few near the phone charm need the full ancestor walk below.
+                bool nearCharm = IsExactPhoneCharm(go.name);
+                Transform parent = go.transform.parent;
+                for (int d = 0; d < 3 && parent != null && !nearCharm; d++)
+                {
+                    nearCharm = IsExactPhoneCharm(parent.gameObject.name);
+                    parent = parent.parent;
+                }
+                if (!nearCharm) return false;
+
                 // A placed custom charm sits next to the original under the phone charm instance, so
-                // its own meshes would match the parent-name check below and get replaced again.
+                // its own meshes match the check above and would get replaced again.
                 for (var t = go.transform; t != null; t = t.parent)
                 {
                     if ((t.name ?? string.Empty).StartsWith(CustomCharmNamePrefix, StringComparison.Ordinal))
                         return false;
                 }
-
-                string goName = (go.name ?? string.Empty).ToLowerInvariant();
-
-                if (IsExactPhoneCharm(goName))
-                    return true;
-
-                Transform parent = go.transform.parent;
-                for (int d = 0; d < 3 && parent != null; d++)
-                {
-                    string pName = (parent.gameObject.name ?? string.Empty).ToLowerInvariant();
-                    if (IsExactPhoneCharm(pName))
-                        return true;
-                    parent = parent.parent;
-                }
+                return true;
             }
-            catch { }
-
-            return false;
+            catch (Exception ex)
+            {
+                Plugin.Log.LogDebug($"[Charm] IsCharmTarget error: {ex.Message}");
+                return false;
+            }
         }
 
         // --- Mesh-only charms ---
@@ -597,6 +599,7 @@ namespace CharmReplacer
         internal static void ApplyCharmMaterials(MeshRenderer mr, Il2CppReferenceArray<Material> targetMaterials)
         {
             if (mr == null) return;
+            var currentMats = mr.sharedMaterials;
             if (targetMaterials != null && targetMaterials.Length > 0)
             {
                 var newMats = new Il2CppReferenceArray<Material>(targetMaterials.Length);
@@ -610,17 +613,17 @@ namespace CharmReplacer
                         PrepareRuntimeMaterial(cloned);
                         newMats[m] = cloned;
                     }
-                    else if (mr.sharedMaterials != null && m < mr.sharedMaterials.Length)
+                    else if (currentMats != null && m < currentMats.Length)
                     {
-                        newMats[m] = mr.sharedMaterials[m];
+                        newMats[m] = currentMats[m];
                     }
                 }
                 mr.sharedMaterials = newMats;
                 return;
             }
 
-            if (CharmState.CapturedGameMaterials == null && mr.sharedMaterials != null && mr.sharedMaterials.Length > 0)
-                CharmState.CapturedGameMaterials = mr.sharedMaterials;
+            if (CharmState.CapturedGameMaterials == null && currentMats != null && currentMats.Length > 0)
+                CharmState.CapturedGameMaterials = currentMats;
             if (CharmState.CapturedGameMaterials != null)
                 mr.sharedMaterials = CharmState.CapturedGameMaterials;
         }
@@ -840,6 +843,7 @@ namespace CharmReplacer
         {
             try
             {
+                Shader urpLit = null;
                 var newMRs = newCharm.GetComponentsInChildren<MeshRenderer>(true);
                 foreach (var mr in newMRs)
                 {
@@ -852,8 +856,8 @@ namespace CharmReplacer
                         if (mat.shader == null || shaderName == "Hidden/InternalErrorShader")
                         {
                             Plugin.Log.LogError($"[CharmShader] Mat '{mat.name}' tiene shader ROTO ('{shaderName}'). El shader original del bundle no existe en el juego. Reexporta usando un shader que el juego tenga cargado (ej. URP/Lit).");
-                            var fallback = Shader.Find("Universal Render Pipeline/Lit");
-                            if (fallback != null) mat.shader = fallback;
+                            urpLit ??= Shader.Find("Universal Render Pipeline/Lit");
+                            if (urpLit != null) mat.shader = urpLit;
                             continue;
                         }
 
@@ -865,7 +869,7 @@ namespace CharmReplacer
 
                         if (isBuiltIn)
                         {
-                            var urpLit = Shader.Find("Universal Render Pipeline/Lit");
+                            urpLit ??= Shader.Find("Universal Render Pipeline/Lit");
                             if (urpLit != null)
                             {
                                 Plugin.Log.LogInfo($"[CharmShader] Built-in→URP: '{shaderName}' → 'Universal Render Pipeline/Lit'");

@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -9,7 +8,7 @@ namespace CharmReplacer
     {
         public static CharmReplacerBehavior Instance { get; private set; }
 
-        private float _scanInterval = 1.0f;
+        private const float ScanInterval = 1.0f;
         private float _nextScanDelay = 0f;
         private int _pendingScans = 0;
         private int _charmRetries = 0;
@@ -24,24 +23,6 @@ namespace CharmReplacer
         private const int FastPollBudgetFrames = 180;
         private const int StableEmptyFramesToStop = 5;
 
-        // MagicaCloth2 delayed re-enable queue — two parallel lists so multiple cloths
-        // (e.g. local + remote player in multiplayer) can all be tracked independently.
-        // Previously a single ref meant the second ScheduleClothReenable() call
-        // overwrote the first, leaving the first cloth stuck disabled forever.
-        private readonly List<MonoBehaviour> _pendingClothList  = new List<MonoBehaviour>();
-        private readonly List<int>           _pendingClothDelays = new List<int>();
-
-        // Delayed re-enable + BuildAndRun for the game's MagicaCloth after a mesh-only charm
-        // swaps the phone-charm mesh. The cloth is disabled at swap time; a few frames later we
-        // re-enable and rebuild so it re-initialises against the NEW mesh — giving physics on
-        // the first load (not only after a graceful restart).
-        private readonly List<MonoBehaviour> _pendingClothRebuild  = new List<MonoBehaviour>();
-        private readonly List<int>           _pendingClothRebuildDelays = new List<int>();
-
-        // Renderer re-enable after BuildAndRun (hide during async rebuild)
-        private Renderer _pendingRendererReenable = null;
-        private int _rendererReenableDelay = 0;
-
         // Skin retry: the phone visual is an async-loaded prefab (NetworkPlayer(Clone)/PlayerVisual)
         // that appears seconds-to-tens-of-seconds after scene entry — long after the fast poll gives
         // up. Retry the skin scan at low frequency while in gameplay (v1.7 game scenes are GUID-named,
@@ -50,10 +31,7 @@ namespace CharmReplacer
         private float _skinRetryTimer = 0f;
         private const float SkinRetryInterval = 1.5f;
 
-        // Main-menu phone preview: keep scanning while in the menu so we skin the preview whenever it
-        // appears (loads async, or only shows when the customization screen is opened).
         private bool _inMainMenu = false;
-        private float _menuRetryTimer = 0f;
 
         public void Awake()
         {
@@ -117,89 +95,11 @@ namespace CharmReplacer
                 LocalVisuals.Tick();
                 IconStudio.Tick();
 
-                // MagicaCloth2 delayed re-enable queue (multiplayer-safe)
-                for (int ci = _pendingClothList.Count - 1; ci >= 0; ci--)
-                {
-                    if (_pendingClothDelays[ci] > 0)
-                    {
-                        _pendingClothDelays[ci]--;
-                    }
-                    else
-                    {
-                        var cloth = _pendingClothList[ci];
-                        if (cloth != null)
-                        {
-                            Plugin.Log.LogInfo($"[CharmPhysics] Re-enabling cloth on '{cloth.gameObject.name}'");
-                            cloth.enabled = true;
-                        }
-                        _pendingClothList.RemoveAt(ci);
-                        _pendingClothDelays.RemoveAt(ci);
-                    }
-                }
-
-                if (_pendingRendererReenable != null)
-                {
-                    if (_rendererReenableDelay > 0)
-                        _rendererReenableDelay--;
-                    else
-                    {
-                        _pendingRendererReenable.enabled = true;
-                        Plugin.Log.LogDebug($"[CharmPhysics] Renderer re-enabled on '{_pendingRendererReenable.gameObject.name}'");
-                        _pendingRendererReenable = null;
-                    }
-                }
-
-                // Game-cloth rebuild after a mesh-only charm swap (re-enable + BuildAndRun)
-                for (int ri = _pendingClothRebuild.Count - 1; ri >= 0; ri--)
-                {
-                    if (_pendingClothRebuildDelays[ri] > 0)
-                    {
-                        _pendingClothRebuildDelays[ri]--;
-                        continue;
-                    }
-                    var cloth = _pendingClothRebuild[ri];
-                    _pendingClothRebuild.RemoveAt(ri);
-                    _pendingClothRebuildDelays.RemoveAt(ri);
-                    if (cloth == null) continue;
-                    try
-                    {
-                        // Re-activate the whole GameObject (it was toggled off at swap time) so
-                        // MagicaCloth2 re-initialises from scratch against the NEW mesh, then build.
-                        cloth.gameObject.SetActive(true);
-                        cloth.enabled = true;
-                        var mc2 = cloth.TryCast<MagicaCloth2.MagicaCloth>();
-                        if (mc2 != null)
-                        {
-                            mc2.BuildAndRun();
-                            Plugin.Log.LogInfo($"[CharmPhysics] ✓ Re-enabled charm GO + BuildAndRun on '{cloth.gameObject.name}' (success = no '[MC2] Already built' above).");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Plugin.Log.LogWarning($"[CharmPhysics] Cloth rebuild error: {ex.Message}");
-                    }
-                }
-
-
-                if (CharmState.CustomMesh == null && CharmState.CustomPrefab == null
-                    && CharmState.PlayerCharmMeshes.Count == 0 && CharmState.PlayerCharmPrefabs.Count == 0
-                    && CharmState.CustomSkinTexture == null && CharmState.PlayerBaseTextures.Count == 0) return;
-
-                // Menu preview: persistent low-frequency scan while in the main menu.
-                if (_inMainMenu && CharmState.CustomSkinTexture != null)
-                {
-                    _menuRetryTimer += Time.deltaTime;
-                    if (_menuRetryTimer >= 1.0f)
-                    {
-                        _menuRetryTimer = 0f;
-                        SkinSystem.TryApplySkinToMainMenuPhonePreview();
-                    }
-                }
+                if (!HasCharmSource && !HasSkinSource) return;
 
                 if (_gameFastPollFrames > 0)
                 {
-                    bool hasSkinSource = CharmState.CustomSkinTexture != null || CharmState.PlayerBaseTextures.Count > 0;
-                    if (hasSkinSource && CharmState.SkinnedRendererIds.Count == 0)
+                    if (HasSkinSource && CharmState.SkinnedRendererIds.Count == 0)
                     {
                         SkinSystem.TryApplySkinToPhoneSourceMaterials();
                         if (CharmState.SkinnedRendererIds.Count > 0)
@@ -235,7 +135,7 @@ namespace CharmReplacer
                     {
                         DoScanAndReplace();
                         _pendingScans--;
-                        _nextScanDelay = _scanInterval;
+                        _nextScanDelay = ScanInterval;
                     }
                 }
 
@@ -259,8 +159,7 @@ namespace CharmReplacer
                 // visual loads. TryApplySkinToPhoneSourceMaterials skips already-painted renderers, so
                 // re-running is cheap/idempotent, catches remote players whose phone loads late, and
                 // self-heals if the game re-clones/reverts the phone material.
-                bool hasSkinSrc = CharmState.CustomSkinTexture != null || CharmState.PlayerBaseTextures.Count > 0;
-                if (hasSkinSrc && !_inMainMenu && !CharmState.SkinEverPainted)
+                if (HasSkinSource && !_inMainMenu && !CharmState.SkinEverPainted)
                 {
                     _skinRetryTimer += Time.deltaTime;
                     if (_skinRetryTimer >= SkinRetryInterval)
@@ -285,41 +184,28 @@ namespace CharmReplacer
             catch (Exception ex) { Plugin.Log.LogError($"[Skin] Cover extras frame error: {ex}"); }
         }
 
+        private static bool HasSkinSource =>
+            CharmState.CustomSkinTexture != null || CharmState.PlayerBaseTextures.Count > 0;
+
+        private static bool HasCharmSource =>
+            CharmState.CustomMesh != null || CharmState.CustomPrefab != null
+            || CharmState.PlayerCharmMeshes.Count > 0 || CharmState.PlayerCharmPrefabs.Count > 0;
+
         public void DoScanAndReplace()
         {
-            if (CharmState.CustomMesh == null && CharmState.CustomPrefab == null
-                && CharmState.PlayerCharmMeshes.Count == 0 && CharmState.PlayerCharmPrefabs.Count == 0
-                && CharmState.CustomSkinTexture == null && CharmState.PlayerBaseTextures.Count == 0) return;
+            if (!HasCharmSource && !HasSkinSource) return;
 
             try
             {
-                if (CharmState.CustomSkinTexture != null || CharmState.PlayerBaseTextures.Count > 0)
+                if (HasSkinSource)
                 {
-                    try
-                    {
-                        int sourceMaterialsReplaced = SkinSystem.TryApplySkinToPhoneSourceMaterials();
-                        if (sourceMaterialsReplaced > 0)
-                        {
-                            Plugin.Log.LogInfo($"[Skin] ✓ {sourceMaterialsReplaced} phone source material(s) updated.");
-                        }
-
-                        int menuPreviewReplaced = SkinSystem.TryApplySkinToMainMenuPhonePreview();
-                        if (menuPreviewReplaced > 0)
-                        {
-                            Plugin.Log.LogInfo($"[Skin] ✓ {menuPreviewReplaced} menu preview renderer(s) updated.");
-                        }
-                    }
-                    catch (Exception skinEx)
-                    {
-                        Plugin.Log.LogWarning($"[Skin] Apply error: {skinEx.Message}");
-                    }
+                    int sourceMaterialsReplaced = SkinSystem.TryApplySkinToPhoneSourceMaterials();
+                    if (sourceMaterialsReplaced > 0)
+                        Plugin.Log.LogInfo($"[Skin] ✓ {sourceMaterialsReplaced} phone source material(s) updated.");
                 }
 
-                if (CharmState.CustomMesh != null || CharmState.CustomPrefab != null
-                    || CharmState.PlayerCharmMeshes.Count > 0 || CharmState.PlayerCharmPrefabs.Count > 0)
-                {
+                if (HasCharmSource)
                     CharmSystem.TryApplyCharmToMeshFilters();
-                }
             }
             catch (Exception ex)
             {
@@ -332,7 +218,6 @@ namespace CharmReplacer
             // Math.Max: cascading calls (e.g. scene load + RequestGameFastPoll within
             // the same frame) don't reset an already-running scan sequence back to 5.
             _pendingScans = Math.Max(_pendingScans, 5);
-            _scanInterval = 1.0f;
             _nextScanDelay = 0f;
         }
 
@@ -365,17 +250,13 @@ namespace CharmReplacer
             if (isMainMenu || isGame)
             {
                 PlayerIdentity.ClearCaches();
-                SkinSystem.ClearMaterialCache(); // invalidate IsMaterialPhoneDefault cache
+                SkinSystem.ClearMaterialCache();
                 CharmState.SkinnedRendererIds.Clear();
-                CharmState.MenuPreviewRendererIds.Clear();
-                CharmState.MenuPreviewRootIds.Clear();
                 CharmState.CharmedMeshFilterIds.Clear();
                 CharmState.ReplacedOriginalCharmGOs.Clear(); // re-enable tracking for new scene
                 CharmState.SkinDebugLogged = false;
-                CharmState.DefaultPhoneTexture = null;
-                CharmState.DefaultPhoneTextureLogged = false;
                 SkinOverride.ClearSceneState();
-                LocalVisuals.ClearSceneState();
+                LocalVisuals.ClearSceneState(isMainMenu);
             }
 
             if (isGame)
@@ -388,18 +269,18 @@ namespace CharmReplacer
                 // the main menu (RequestMenuSync), so gameplay does no network work.
             }
 
-            // Sync paint attempt for hot scene transitions where the renderer is
-            // already in scene. Falls through to the per-frame poll otherwise.
             if (isMainMenu)
             {
                 // Do all remote downloads here (in the menu): refresh the manifest and prefetch any
-                // changed/missing assets, so a match never triggers network work.
-                try { RemoteSkinService.RequestMenuSync(); } catch { }
-                try { SkinSystem.TryApplySkinToMainMenuPhonePreview(); } catch { }
+                // changed/missing assets, so a match never triggers network work. The menu phone and
+                // the customization preview are painted by LocalVisuals.
+                RemoteSkinService.RequestMenuSync();
             }
+            // Sync paint attempt for hot scene transitions where the renderer is
+            // already in scene. Falls through to the per-frame poll otherwise.
             if (isGame)
             {
-                try { SkinSystem.TryApplySkinToPhoneSourceMaterials(); } catch { }
+                SkinSystem.TryApplySkinToPhoneSourceMaterials();
                 _gameFastPollFrames = FastPollBudgetFrames;
                 _gameFastPollStableEmpty = 0;
             }
@@ -412,29 +293,6 @@ namespace CharmReplacer
         {
             DoScanAndReplace();
             ScheduleFastScans();
-        }
-
-        // MagicaCloth2 disables immediately, re-enables after N frames so the
-        // physics engine has time to process the mesh swap before rebinding.
-        public void ScheduleClothReenable(MonoBehaviour cloth)
-        {
-            _pendingClothList.Add(cloth);
-            _pendingClothDelays.Add(3);
-        }
-
-        // Re-enable + BuildAndRun the game's MagicaCloth N frames after a mesh-only charm swap,
-        // so it rebuilds against the swapped mesh (physics on first load, not only after restart).
-        public void ScheduleClothRebuild(MonoBehaviour cloth, int frames)
-        {
-            if (cloth == null) return;
-            _pendingClothRebuild.Add(cloth);
-            _pendingClothRebuildDelays.Add(frames);
-        }
-
-        public void ScheduleRendererReenable(Renderer renderer, int frames = 10)
-        {
-            _pendingRendererReenable = renderer;
-            _rendererReenableDelay = frames;
         }
     }
 }

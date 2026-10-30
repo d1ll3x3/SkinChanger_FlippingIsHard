@@ -17,21 +17,23 @@ namespace CharmReplacer
     {
         private const string CoverKey = "cupcharm.custom.cover";
         private const string CharmKey = "cupcharm.custom.charm";
+        private const string FaceKey = "cupcharm.custom.face";
         private const string GlowKey = "cupcharm.extra.jumpglow";
         private const string CoverColorKey = "cupcharm.extra.covercolor";
         private const string GlowColorKey = "cupcharm.extra.glowcolor";
         // Order in the tab.
-        private static readonly string[] s_entryOrder = { CoverKey, CharmKey, CoverColorKey, GlowKey, GlowColorKey };
+        private static readonly string[] s_entryOrder = { CoverKey, CharmKey, FaceKey, CoverColorKey, GlowKey, GlowColorKey };
 
         private static SkinUISO _coverEntry;
         private static SkinUISO _charmEntry;
+        private static SkinUISO _faceEntry;
         private static SkinUISO _glowEntry;
         private static SkinUISO _coverColorEntry;
         private static SkinUISO _glowColorEntry;
         private static CustomizationScreenController _controller;
 
         public static bool IsCustomKey(string key) =>
-            key == CoverKey || key == CharmKey || key == GlowKey || key == CoverColorKey || key == GlowColorKey;
+            key == CoverKey || key == CharmKey || key == FaceKey || key == GlowKey || key == CoverColorKey || key == GlowColorKey;
 
         private static bool IsGlow(SkinUISO skin) => skin != null && skin.addressableKey == GlowKey;
 
@@ -60,6 +62,7 @@ namespace CharmReplacer
                 skins.Add(GetOrCreateEntry(category));
                 IconStudio.Request(category);
             }
+            if (CustomFace.HasAsset) skins.Add(GetOrCreateFaceEntry());
             skins.Add(GetOrCreateColorEntry(ref _coverColorEntry, CoverColorKey, CoverExtras.CoverColorSwatch()));
             skins.Add(GetOrCreateGlowEntry());
             skins.Add(GetOrCreateColorEntry(ref _glowColorEntry, GlowColorKey, CoverExtras.GlowColorSwatch()));
@@ -67,6 +70,19 @@ namespace CharmReplacer
 
         /// <summary>Text shown instead of the entry's icon, or null to keep the icon.</summary>
         public static string LabelFor(SkinUISO skin) => IsGlow(skin) ? "Jump" : null;
+
+        private static SkinUISO GetOrCreateFaceEntry()
+        {
+            if (_faceEntry != null) return _faceEntry;
+            _faceEntry = ScriptableObject.CreateInstance(Il2CppType.Of<SkinUISO>()).Cast<SkinUISO>();
+            _faceEntry.name = "SkinUI_CharmReplacer_Face";
+            _faceEntry.hideFlags = HideFlags.DontUnloadUnusedAsset;
+            _faceEntry.addressableKey = FaceKey;
+            _faceEntry.skinCategory = SkinCategory.Face;
+            _faceEntry.skinRarity = SkinRarity.Mythical;
+            _faceEntry.sprite = CustomFace.Icon ?? BaseSkinSprite(SkinCategory.Face);
+            return _faceEntry;
+        }
 
         private static SkinUISO GetOrCreateColorEntry(ref SkinUISO entry, string key, Sprite swatch)
         {
@@ -165,6 +181,12 @@ namespace CharmReplacer
                 controller.RefreshVisibleEntryStates();
                 return false;
             }
+            if (skin.addressableKey == FaceKey)
+            {
+                CustomFace.Toggle();
+                controller.RefreshVisibleEntryStates();
+                return false;
+            }
             SkinOverride.Toggle(skin.skinCategory);
             LocalVisuals.OnCustomToggled(skin.skinCategory);
             controller.RefreshVisibleEntryStates();
@@ -174,6 +196,7 @@ namespace CharmReplacer
         public static bool IsSelected(SkinUISO skin) => skin.addressableKey switch
         {
             GlowKey or GlowColorKey => CoverExtras.GlowEnabled,
+            FaceKey => CustomFace.IsActive,
             CoverColorKey => CoverExtras.CoverColored,
             _ => SkinOverride.IsLocalActive(skin.skinCategory),
         };

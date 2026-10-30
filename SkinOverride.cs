@@ -23,6 +23,9 @@ namespace CharmReplacer
         // main menu has none).
         private const string FallbackCharmBaseKey = "chm_phone";
         private const float TickInterval = 0.5f;
+        // Players register from PlayerSkins.Init; the scene search only catches any that slipped past
+        // it (Unity's object search walks the whole level, a hitch when it ran every tick).
+        private const float RescanInterval = 5f;
         private const float FlagResendDelay = 3f;
         // ApplyAsync is async; give a base reload this long to land before asking again.
         private const float EnsureBaseCooldown = 2f;
@@ -31,6 +34,8 @@ namespace CharmReplacer
         private static ConfigEntry<bool> _charmEnabled;
 
         private static float _nextTick;
+        private static float _nextRescan;
+        private static readonly List<PlayerSkins> _players = new List<PlayerSkins>();
         private static float _nextFlagSend;
         private static string _charmBaseKey;
         private static bool _charmBaseResolved;
@@ -82,11 +87,22 @@ namespace CharmReplacer
             _nextFlagSend = 0f;
         }
 
+        /// <summary>PlayerSkins.Init postfix: track the player without searching the scene for it.</summary>
+        public static void Register(PlayerSkins skins)
+        {
+            if (skins == null) return;
+            foreach (var known in _players)
+                if (known != null && known.Pointer == skins.Pointer) return;
+            _players.Add(skins);
+        }
+
         public static void ClearSceneState()
         {
+            _nextRescan = 0f;
             _lastVisible.Clear();
             _lastEnsure.Clear();
             CapFlip.ClearSceneState();
+            CoverExtras.ClearSceneState();
         }
 
         // ── Remote state ──────────────────────────────────────────────────────
@@ -226,22 +242,28 @@ namespace CharmReplacer
 
             try
             {
-                var allSkins = UnityEngine.Object.FindObjectsOfType<PlayerSkins>();
-                if (allSkins != null)
+                if (Time.time >= _nextRescan)
                 {
-                    foreach (var skins in allSkins)
-                    {
-                        var networked = skins?.playerRef?.playerNetworked;
-                        if (networked == null || !skins.isInitialized) continue;
-                        if (networked.IsOwner) PushLocalFlag(networked);
-                        foreach (var category in s_categories)
-                            EvaluatePlayer(skins, networked, category);
-                        CapFlip.Evaluate(skins, networked);
-                        CoverExtras.Apply(GetHandler(skins.skinsHandlerMap, SkinCategory.Cover),
-                            skins.skinsManager?.skinAddressableLibrary,
-                            networked.IsOwner ? CoverExtras.LocalLook() : CoverExtras.RemoteLook(networked),
-                            skins.playerRef?.playerJumpEnabledShader);
-                    }
+                    _nextRescan = Time.time + RescanInterval;
+                    var found = UnityEngine.Object.FindObjectsByType<PlayerSkins>(FindObjectsSortMode.None);
+                    if (found != null)
+                        foreach (var skins in found) Register(skins);
+                }
+
+                _players.RemoveAll(s => s == null);
+                foreach (var skins in _players)
+                {
+                    var networked = skins.playerRef?.playerNetworked;
+                    if (networked == null || !skins.isInitialized) continue;
+                    if (networked.IsOwner) PushLocalFlag(networked);
+                    foreach (var category in s_categories)
+                        EvaluatePlayer(skins, networked, category);
+                    CapFlip.Evaluate(skins, networked);
+                    if (networked.IsOwner) CustomFace.Apply(GetHandler(skins.skinsHandlerMap, SkinCategory.Face));
+                    CoverExtras.Apply(GetHandler(skins.skinsHandlerMap, SkinCategory.Cover),
+                        skins.skinsManager?.skinAddressableLibrary,
+                        networked.IsOwner ? CoverExtras.LocalLook() : CoverExtras.RemoteLook(networked),
+                        skins.playerRef?.playerJumpEnabledShader);
                 }
             }
             catch (Exception ex)

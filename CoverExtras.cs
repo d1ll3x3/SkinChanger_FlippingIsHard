@@ -76,6 +76,8 @@ namespace CharmReplacer
             public Color? Glow;
             public Color? Tint;
             public readonly Color?[] Wizard = new Color?[3];
+
+            public string Key => $"{Glow}|{Tint}|{Wizard[0]}|{Wizard[1]}|{Wizard[2]}";
         }
 
         private static ConfigEntry<bool> _glowEnabled;
@@ -99,6 +101,8 @@ namespace CharmReplacer
             public Material Material;
             public PlayerJumpEnabledShader Jump;
             public Color Color;
+            // Last jump value written to Material (the material is ours alone).
+            public float Value = -1f;
         }
 
         private sealed class OutlineGlow
@@ -111,6 +115,8 @@ namespace CharmReplacer
             public Color[] OriginalColors;
             public PlayerJumpEnabledShader Jump;
             public Color Color;
+            // Jump value the clone's colours were last blended for; NaN forces a rewrite.
+            public float Value = float.NaN;
         }
 
         private sealed class RecolorClone
@@ -127,6 +133,17 @@ namespace CharmReplacer
         private static readonly HashSet<string> _loggedMeshMisses = new HashSet<string>(StringComparer.Ordinal);
         private static readonly HashSet<string> _loggedGlowModes = new HashSet<string>(StringComparer.Ordinal);
         private static readonly Dictionary<string, Sprite> _swatches = new Dictionary<string, Sprite>(StringComparer.Ordinal);
+
+        // Last finished pass per cover handler. Apply runs for every player twice a second; once a cover
+        // matches its look, repeating the pass only re-reads its renderers and materials (garbage the
+        // game's GC then has to collect). _version moves when something else rewrites cover materials.
+        private static readonly Dictionary<IntPtr, string> _settled = new Dictionary<IntPtr, string>();
+        private static int _version;
+
+        /// <summary>Cover materials were replaced (a repaint): the next pass looks again.</summary>
+        public static void Invalidate() => _version++;
+
+        public static void ClearSceneState() => _settled.Clear();
 
         public static void Init(ConfigEntry<bool> glowEnabled, ConfigEntry<string> glowColor, ConfigEntry<string> coverTint,
             ConfigEntry<string>[] wizardColors)
@@ -147,6 +164,7 @@ namespace CharmReplacer
         {
             if (_glowEnabled == null) return;
             _glowEnabled.Value = !_glowEnabled.Value;
+            Invalidate();
             Plugin.Log.LogInfo($"[NativeMenu] Jump glow {(_glowEnabled.Value ? "enabled" : "disabled")}.");
         }
 
@@ -277,6 +295,10 @@ namespace CharmReplacer
                 if (handler == null || handler.IsLoading) return;
                 SkinInstanceRef instance;
                 if (!handler.TryGetInstance(out instance) || instance == null) return;
+                // The instance changes whenever the handler loads another skin.
+                string state = $"{instance.Pointer}|{look.Key}|{_version}";
+                if (_settled.TryGetValue(handler.Pointer, out var last) && last == state) return;
+
                 var renderers = instance.GetComponentsInChildren<Renderer>(true);
                 if (renderers == null) return;
 
@@ -290,6 +312,7 @@ namespace CharmReplacer
                         RemoveOverlay(renderers[i].Pointer);
                         RemoveOutlineGlows(renderers[i]);
                     }
+                    _settled[handler.Pointer] = state;
                     return;
                 }
 
@@ -305,6 +328,7 @@ namespace CharmReplacer
                 if (placed)
                 {
                     LogGlowMode(handler.CurrentSkinKey, "side lines");
+                    _settled[handler.Pointer] = state;
                     return;
                 }
 
@@ -318,6 +342,7 @@ namespace CharmReplacer
                 }
                 if (placed) LogGlowMode(handler.CurrentSkinKey, "outline");
                 else LogMeshMiss(handler.CurrentSkinKey, renderers);
+                _settled[handler.Pointer] = state;
             }
             catch (Exception ex)
             {
@@ -351,7 +376,11 @@ namespace CharmReplacer
                     float value = o.Jump != null ? o.Jump.lastAppliedJumpEnabled : 1f;
                     bool on = value > 0.02f && o.Cover.enabled;
                     o.Renderer.enabled = on;
-                    if (on) o.Material.SetFloat(JumpEnabledId, value);
+                    if (on && value != o.Value)
+                    {
+                        o.Material.SetFloat(JumpEnabledId, value);
+                        o.Value = value;
+                    }
                 }
                 if (dead != null) foreach (var key in dead) RemoveOverlay(key);
             }
@@ -373,6 +402,9 @@ namespace CharmReplacer
                     continue;
                 }
                 float value = g.Jump != null ? g.Jump.lastAppliedJumpEnabled : 1f;
+                // Most frames the jump is steadily on or off: nothing to rewrite.
+                if (value == g.Value) continue;
+                g.Value = value;
                 for (int c = 0; c < g.ColorIds.Length; c++)
                 {
                     var target = new Color(g.Color.r * GlowIntensity, g.Color.g * GlowIntensity, g.Color.b * GlowIntensity,
@@ -397,7 +429,11 @@ namespace CharmReplacer
                 if (tracked != null && materials[slot] != null && materials[slot].Pointer == tracked.Clone.Pointer)
                 {
                     tracked.Jump = jump;
-                    tracked.Color = color;
+                    if (tracked.Color != color)
+                    {
+                        tracked.Color = color;
+                        tracked.Value = float.NaN;
+                    }
                     continue;
                 }
                 if (tracked != null)
@@ -752,24 +788,7 @@ namespace CharmReplacer
         private static Texture2D BuildMask(Texture source)
         {
             int w = source.width, h = source.height;
-            var rt = RenderTexture.GetTemporary(w, h, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
-            var previous = RenderTexture.active;
-            Color32[] pixels;
-            try
-            {
-                Graphics.Blit(source, rt);
-                RenderTexture.active = rt;
-                var readable = new Texture2D(w, h, TextureFormat.RGBA32, false);
-                readable.ReadPixels(new Rect(0, 0, w, h), 0, 0);
-                readable.Apply(false, false);
-                pixels = readable.GetPixels32();
-                UnityEngine.Object.Destroy(readable);
-            }
-            finally
-            {
-                RenderTexture.active = previous;
-                RenderTexture.ReleaseTemporary(rt);
-            }
+            var pixels = SkinLoader.ReadPixels(source);
 
             var keep = StripKeys(pixels, w, h, out int keys, out int lines);
             var maskPixels = new Color32[w * h];

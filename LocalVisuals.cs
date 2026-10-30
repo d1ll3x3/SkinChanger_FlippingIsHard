@@ -16,10 +16,14 @@ namespace CharmReplacer
     internal static class LocalVisuals
     {
         private const float TickInterval = 0.1f;
+        // Unity's object search walks the whole level: often in the menu, where these visuals live,
+        // and rarely in a match, where it used to cause a hitch every second.
         private const float ScanInterval = 1f;
+        private const float GameplayScanInterval = 10f;
 
         private static float _nextTick;
         private static float _nextScan;
+        private static bool _inMainMenu = true;
         private static PlayerVisualsDummy[] _dummies = Array.Empty<PlayerVisualsDummy>();
         private static EquippedPlayerSkins[] _menuVisuals = Array.Empty<EquippedPlayerSkins>();
 
@@ -61,8 +65,9 @@ namespace CharmReplacer
             _nextTick = 0f;
         }
 
-        public static void ClearSceneState()
+        public static void ClearSceneState(bool inMainMenu)
         {
+            _inMainMenu = inMainMenu;
             _lastVisible.Clear();
             _requestedLoads.Clear();
             _previewNative.Clear();
@@ -92,9 +97,9 @@ namespace CharmReplacer
 
             if (Time.time >= _nextScan)
             {
-                _nextScan = Time.time + ScanInterval;
-                _dummies = UnityEngine.Object.FindObjectsOfType<PlayerVisualsDummy>() ?? Array.Empty<PlayerVisualsDummy>();
-                _menuVisuals = UnityEngine.Object.FindObjectsOfType<EquippedPlayerSkins>() ?? Array.Empty<EquippedPlayerSkins>();
+                _nextScan = Time.time + (_inMainMenu ? ScanInterval : GameplayScanInterval);
+                _dummies = UnityEngine.Object.FindObjectsByType<PlayerVisualsDummy>(FindObjectsSortMode.None) ?? Array.Empty<PlayerVisualsDummy>();
+                _menuVisuals = UnityEngine.Object.FindObjectsByType<EquippedPlayerSkins>(FindObjectsSortMode.None) ?? Array.Empty<EquippedPlayerSkins>();
             }
 
             bool screenActive = ActiveCustomizationDummy != null;
@@ -112,6 +117,7 @@ namespace CharmReplacer
                 CapFlip.EvaluateLocal(SkinOverride.GetHandler(dummy.skinsHandlerMap, SkinCategory.AccessoryHead));
                 CoverExtras.Apply(SkinOverride.GetHandler(dummy.skinsHandlerMap, SkinCategory.Cover),
                     dummy.skinsManager?.skinAddressableLibrary, CoverExtras.LocalLook(), null);
+                CustomFace.Apply(SkinOverride.GetHandler(dummy.skinsHandlerMap, SkinCategory.Face));
             }
 
             foreach (var visual in _menuVisuals)
@@ -124,6 +130,7 @@ namespace CharmReplacer
                 }
                 CapFlip.EvaluateLocal(FindHandler(visual, SkinCategory.AccessoryHead));
                 CoverExtras.Apply(FindHandler(visual, SkinCategory.Cover), visual.skinLibrary, CoverExtras.LocalLook(), null);
+                CustomFace.Apply(FindHandler(visual, SkinCategory.Face));
             }
         }
 
@@ -136,8 +143,8 @@ namespace CharmReplacer
             SkinUISO Resolve(string key) =>
                 !string.IsNullOrEmpty(key) && manager != null && manager.TryGetLoaded(key, out var skin) ? skin : null;
 
-            string equipped = manager?.GetEquippedCategorySkin(category);
-            Drive(dummy.Pointer, handler, category, ShowsCustom(dummy, category), manager, Resolve, equipped);
+            Drive(dummy.Pointer, handler, category, ShowsCustom(dummy, category), manager, Resolve,
+                () => manager?.GetEquippedCategorySkin(category));
         }
 
         internal static SkinPrefabHandler FindHandler(EquippedPlayerSkins visual, SkinCategory category)
@@ -164,7 +171,7 @@ namespace CharmReplacer
             }
 
             Drive(visual.Pointer, handler, category, SkinOverride.IsLocalActive(category), null, Resolve,
-                EquippedKey(category));
+                () => EquippedKey(category));
         }
 
         private static string EquippedKey(SkinCategory category)
@@ -177,7 +184,7 @@ namespace CharmReplacer
         }
 
         private static void Drive(IntPtr owner, SkinPrefabHandler handler, SkinCategory category, bool showCustom,
-            SkinsManager manager, Func<string, SkinUISO> resolve, string equippedKey)
+            SkinsManager manager, Func<string, SkinUISO> resolve, Func<string> equippedKey)
         {
             // Wait for any load (ours or the game's) before acting, keeping the transition pending.
             if (handler.IsLoading) return;
@@ -191,7 +198,8 @@ namespace CharmReplacer
                 // Leave the base instance (painted / carrying the custom charm) for a clean native one.
                 CharmSystem.RemoveCustomCharms(handler.socket);
                 handler.Clear();
-                handler.ApplyAsync(resolve(equippedKey) ?? handler.DefaultSkinUISO);
+                // Looked up only here: it walks the game's equipped list, and Drive runs ten times a second.
+                handler.ApplyAsync(resolve(equippedKey()) ?? handler.DefaultSkinUISO);
                 return;
             }
 

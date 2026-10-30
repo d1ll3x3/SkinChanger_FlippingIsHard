@@ -160,9 +160,6 @@ namespace CharmReplacer
             }
         }
 
-        /// <summary>Forces a manifest refresh soon (used internally by the menu sync).</summary>
-        public static void RequestManifestRefresh() => _nextManifestRefetch = 0f;
-
         /// <summary>
         /// Called when entering the main menu: refresh the manifest and re-run the full prefetch,
         /// so any DB change is pulled here (in the menu) and never mid-match.
@@ -177,7 +174,7 @@ namespace CharmReplacer
         /// Discovers remote players and triggers downloads. Independent of the painting
         /// logic (which early-returns when no skins are loaded), avoiding the chicken-and-egg
         /// problem: with no local skins we still need to fetch remote ones. Throttled to 1s;
-        /// EnsureDownloaded dedupes by nick, so after the first pass it is just O(1) lookups.
+        /// the hash gate dedupes, so after the first pass it is just O(1) lookups.
         /// </summary>
         private static void ScanPlayers()
         {
@@ -328,7 +325,7 @@ namespace CharmReplacer
                     _nextManifestRefetch = float.MaxValue;
                     // Only log on a real change (the periodic re-fetch is otherwise silent).
                     // A changed manifest carries new hashes; the per-player hash tracking in
-                    // EnsureDownloaded re-downloads + repaints the affected entries automatically.
+                    // EnqueueIfStale re-downloads + repaints the affected entries automatically.
                     if (changed)
                         Plugin.Log.LogInfo($"[Remote] Manifest ready: {_bySteamId.Count} by SteamID, {_byName.Count} by name.");
                 }
@@ -375,26 +372,6 @@ namespace CharmReplacer
         {
             s = s?.Trim();
             return (string.IsNullOrEmpty(s) || s == "-") ? null : s;
-        }
-
-        /// <summary>
-        /// Called when a remote player is discovered. If they have assets in the manifest
-        /// that are not already cached/loaded, enqueues them for download.
-        /// </summary>
-        /// <param name="nick">Visible Steam name (dictionary key in CharmState).</param>
-        /// <param name="steamId">Steam ID if it could be resolved, or null/empty.</param>
-        public static void EnsureDownloaded(string nick, string steamId)
-        {
-            if (!Enabled || !_manifestReady || _manifestFailed) return;
-            if (string.IsNullOrEmpty(nick)) return;
-
-            // Resolve the entry: a valid SteamID64 takes priority, then normalized name.
-            Entry entry = null;
-            if (PlayerIdentity.IsValidSteamId64(steamId)) _bySteamId.TryGetValue(steamId, out entry);
-            if (entry == null) _byName.TryGetValue(nick.Trim().ToLowerInvariant(), out entry);
-            if (entry == null) return;
-
-            EnqueueEntry(entry, nick);
         }
 
         /// <summary>

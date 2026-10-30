@@ -31,19 +31,10 @@ internal static class CharmState
     // Custom skin variables
     public static Texture2D CustomSkinTexture;
     public static Texture2D CustomSkinEmissionTexture;
-    // Captured at runtime from the game's M_Phone_Basic_Default material so the
-    // old-version (0.9.15) branch — where the local active material has no name
-    // and only its _MainTex distinguishes cosmetics — can tell whether the player
-    // is currently on the default cosmetic.
-    public static Texture DefaultPhoneTexture;
-    public static bool DefaultPhoneTextureLogged = false;
     public static System.Collections.Generic.Dictionary<string, Texture2D> PlayerBaseTextures = new System.Collections.Generic.Dictionary<string, Texture2D>(System.StringComparer.OrdinalIgnoreCase);
     public static System.Collections.Generic.Dictionary<string, Texture2D> PlayerEmissionTextures = new System.Collections.Generic.Dictionary<string, Texture2D>(System.StringComparer.OrdinalIgnoreCase);
-    public static bool SkinLoaded = false;
-    // Player skin tracking (phone + body renderers)
+    // Player phone renderers painted this scene
     public static HashSet<int> SkinnedRendererIds = new HashSet<int>();
-    public static HashSet<int> MenuPreviewRendererIds = new HashSet<int>();
-    public static HashSet<int> MenuPreviewRootIds = new HashSet<int>();
     public static bool SkinDebugLogged = false;
     public static bool SkinEverPainted = false;
     // Charm retry tracking
