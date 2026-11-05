@@ -150,13 +150,71 @@ namespace CharmReplacer
             if (_materialPhoneDefaultCache.TryGetValue(matId, out bool cached))
                 return cached;
 
-            // Tolerates the "(Clone)" / "(Instance)" / " (1)" suffix of the game's runtime copies.
-            string name = mat.name ?? string.Empty;
-            bool result = name.StartsWith(CoverMaterialName, StringComparison.OrdinalIgnoreCase)
-                && (name.Length == CoverMaterialName.Length
-                    || name[CoverMaterialName.Length] == ' ' || name[CoverMaterialName.Length] == '(');
+            string name = BaseMaterialName(mat.name);
+            bool result = name.Equals(CoverMaterialName, StringComparison.OrdinalIgnoreCase) || _modelCoverMaterials.Contains(name);
             _materialPhoneDefaultCache[matId] = result;
             return result;
+        }
+
+        // Without the "(Clone)" / " (Instance)" / " (1)" suffix of the game's runtime copies.
+        private static string BaseMaterialName(string name)
+        {
+            name ??= string.Empty;
+            int cut = name.IndexOf('(');
+            return (cut >= 0 ? name.Substring(0, cut) : name).TrimEnd();
+        }
+
+        // Body materials of the covers picked as custom cover model (SkinOverride.CoverModel). Only covers
+        // a player loads as their custom base get here, so the whitelist above still holds for everyone
+        // wearing those covers natively: nothing paints a player without a custom skin.
+        private static readonly HashSet<string> _modelCoverMaterials = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> _registeredModels = new HashSet<string>(StringComparer.Ordinal);
+        private static readonly HashSet<string> _unpaintableModels = new HashSet<string>(StringComparer.Ordinal);
+
+        public static bool IsUnpaintableModel(string key) => _unpaintableModels.Contains(key);
+
+        /// <summary>
+        /// Lets the custom skin paint the cover <paramref name="handler"/> shows, a cover other than the
+        /// default one: its body (the largest mesh, outline aside) takes the texture in every material with
+        /// a base map. A cover with none (the Wizard's shader draws its own pattern) can't show the skin.
+        /// </summary>
+        public static void RegisterCoverModel(EHS.Skins.SkinPrefabHandler handler)
+        {
+            string key = handler.CurrentSkinKey;
+            if (string.IsNullOrEmpty(key) || _registeredModels.Contains(key)) return;
+            if (!handler.TryGetInstance(out var instance) || instance == null) return;
+            _registeredModels.Add(key);
+
+            Renderer body = null;
+            int bodyVertices = -1;
+            var renderers = instance.GetComponentsInChildren<Renderer>(true);
+            for (int i = 0; i < renderers.Count; i++)
+            {
+                var renderer = renderers[i];
+                var skinned = renderer != null ? renderer.TryCast<SkinnedMeshRenderer>() : null;
+                var filter = renderer != null && skinned == null ? renderer.GetComponent<MeshFilter>() : null;
+                var mesh = skinned != null ? skinned.sharedMesh : filter != null ? filter.sharedMesh : null;
+                if (mesh == null || mesh.name.IndexOf("_Outline", StringComparison.Ordinal) >= 0 || mesh.vertexCount <= bodyVertices) continue;
+                body = renderer;
+                bodyVertices = mesh.vertexCount;
+            }
+
+            var names = new List<string>();
+            var materials = body != null ? body.sharedMaterials : null;
+            if (materials != null)
+                foreach (var m in materials)
+                    if (m != null && m.HasProperty("_MainTex")) names.Add(BaseMaterialName(m.name));
+
+            if (names.Count == 0)
+            {
+                _unpaintableModels.Add(key);
+                Plugin.Log.LogWarning($"[Skin] Cover '{key}' has no material the custom skin can paint; it shows its own look.");
+                return;
+            }
+            foreach (var name in names) _modelCoverMaterials.Add(name);
+            _materialPhoneDefaultCache.Clear();
+            CharmReplacerBehavior.Instance?.RequestGameFastPoll();
+            Plugin.Log.LogInfo($"[Skin] ✓ Custom skin can paint cover '{key}' ({string.Join(", ", names)}).");
         }
 
         // Emission map property names ApplySkinTexture writes to. Shared so the

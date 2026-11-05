@@ -53,6 +53,8 @@ namespace CharmReplacer
         private static readonly int EmissionColorId = Shader.PropertyToID("_EmissionColor");
         private static readonly int ColorJumpId = Shader.PropertyToID("_ColorJump");
         private static readonly int JumpEnabledId = Shader.PropertyToID("_JumpEnabled");
+        // Shader Graph keyword toggles are also a float property of the same name.
+        private static readonly int JumpLightId = Shader.PropertyToID(JumpLightKeyword);
         private static readonly int AlphaClipFloatId = Shader.PropertyToID("_AlphaClipFloat");
         private static readonly int NormalTexId = Shader.PropertyToID("_NormalTex");
         private static readonly int MsaoTexId = Shader.PropertyToID("_MSAOTex");
@@ -64,32 +66,46 @@ namespace CharmReplacer
             Shader.PropertyToID("_ColorTop"), Shader.PropertyToID("_ColorBottom"), Shader.PropertyToID("_ColorSwirl"),
         };
 
-        // What the menu entries cycle through. Index 0 of the cover palette is the game's own look.
-        private static readonly string[] s_coverPalette =
-            { "", "FF2020", "FF8000", "FFE000", "30E040", "20E0E0", "2050FF", "9030FF", "FF40C0", "FFFFFF", "303030" };
-        private static readonly string[] s_glowPalette =
-            { "FF0000", "FF8000", "FFE000", "30FF40", "20F0FF", "2050FF", "A030FF", "FF40C0", "FFFFFF" };
+        private const string StyleToken = "jstyle=";
+        private const string DefaultGlowHex = "FF0000";
+        // Covers that light up on jump by themselves (Hangeris) have this on in their material.
+        private const string JumpLightKeyword = "_JUMPLIGHTENABLED";
+        // Colour values are "RRGGBB" or "RRGGBB:NNN", NNN being the intensity in percent.
+        public const int MaxIntensityPercent = 200;
 
-        /// <summary>What to add to one cover. Null colours keep the game's look.</summary>
+        /// <summary>The colours set from the Mod tab's colour picker.</summary>
+        internal enum ColorTarget { Cover, Glow, WizardTop, WizardBottom, WizardSwirl }
+
+        /// <summary>
+        /// Which jump light a cover gets. Lines: the Hangeris side lines without the keypad. Keypad: the
+        /// Hangeris light whole. Outline: the phone's outline, what the Wizard and other "Bare" covers show.
+        /// Bare covers can't take the first two (the mask is laid out on the full body's UVs).
+        /// </summary>
+        internal enum JumpStyle { Lines, Keypad, Outline }
+
+        /// <summary>What to add to one cover. Null colours keep the game's look; colours carry their intensity.</summary>
         internal sealed class Look
         {
             public Color? Glow;
             public Color? Tint;
             public readonly Color?[] Wizard = new Color?[3];
+            public JumpStyle Style;
 
-            public string Key => $"{Glow}|{Tint}|{Wizard[0]}|{Wizard[1]}|{Wizard[2]}";
+            public string Key => $"{Glow}|{Tint}|{Wizard[0]}|{Wizard[1]}|{Wizard[2]}|{Style}";
         }
 
         private static ConfigEntry<bool> _glowEnabled;
-        private static ConfigEntry<string> _glowColor;
-        private static ConfigEntry<string> _coverTint;
-        private static ConfigEntry<string>[] _wizardColors;
+        private static ConfigEntry<JumpStyle> _style;
+        // Indexed by ColorTarget.
+        private static ConfigEntry<string>[] _colors;
 
         private enum MaskState { Idle, Requested, Loading, Ready, Failed }
         private static MaskState _maskState;
         private static AsyncOperationHandle<GameObject> _loadHandle;
         private static float _loadStart;
-        private static Material _glowTemplate;
+        // Overlay materials, one per mask: the side lines, and the Hangeris light whole.
+        private static Material _linesTemplate;
+        private static Material _keypadTemplate;
         private static string _bodyMeshName;
         private static int _bodyVertexCount;
 
@@ -101,6 +117,7 @@ namespace CharmReplacer
             public Material Material;
             public PlayerJumpEnabledShader Jump;
             public Color Color;
+            public Material Template;
             // Last jump value written to Material (the material is ours alone).
             public float Value = -1f;
         }
@@ -145,20 +162,29 @@ namespace CharmReplacer
 
         public static void ClearSceneState() => _settled.Clear();
 
-        public static void Init(ConfigEntry<bool> glowEnabled, ConfigEntry<string> glowColor, ConfigEntry<string> coverTint,
-            ConfigEntry<string>[] wizardColors)
+        public static void Init(ConfigEntry<bool> glowEnabled, ConfigEntry<JumpStyle> style, ConfigEntry<string>[] colors)
         {
             _glowEnabled = glowEnabled;
-            _glowColor = glowColor;
-            _coverTint = coverTint;
-            _wizardColors = wizardColors;
+            _style = style;
+            _colors = colors;
         }
+
+        public static bool IsWizard(string coverKey) => coverKey == WizardKey;
 
         // ── Menu ──────────────────────────────────────────────────────────────
 
         public static bool GlowEnabled => _glowEnabled != null && _glowEnabled.Value;
 
-        public static bool CoverColored => TryParseHex(_coverTint?.Value, out _) || HasWizardColors();
+        public static JumpStyle Style => _style != null ? _style.Value : JumpStyle.Lines;
+
+        public static string StyleName(JumpStyle style) => style.ToString();
+
+        public static string StyleDescription(JumpStyle style) => style switch
+        {
+            JumpStyle.Lines => "Side lines",
+            JumpStyle.Keypad => "Lines and keypad",
+            _ => "Phone outline",
+        };
 
         public static void ToggleGlow()
         {
@@ -168,68 +194,129 @@ namespace CharmReplacer
             Plugin.Log.LogInfo($"[NativeMenu] Jump glow {(_glowEnabled.Value ? "enabled" : "disabled")}.");
         }
 
-        /// <summary>Next cover colour: the tint for every cover, and a matching theme for the Wizard.</summary>
-        public static void CycleCoverColor()
+        public static void SetStyle(JumpStyle style)
         {
-            if (_coverTint == null || _wizardColors == null) return;
-            string next = NextInPalette(s_coverPalette, Normalize(_coverTint.Value));
-            _coverTint.Value = next;
-            if (TryParseHex(next, out var c))
-            {
-                // The game's Wizard runs dark at the top, mid at the bottom, the swirl in between.
-                _wizardColors[0].Value = ToHex(c * 0.35f);
-                _wizardColors[1].Value = ToHex(c * 0.75f);
-                _wizardColors[2].Value = ToHex(Color.Lerp(c, Color.white, 0.25f) * 0.55f);
-            }
-            else
-            {
-                foreach (var entry in _wizardColors) entry.Value = "";
-            }
-            Plugin.Log.LogInfo($"[NativeMenu] Cover colour {(next.Length == 0 ? "original" : next)}.");
+            if (_style == null) return;
+            _style.Value = style;
+            Invalidate();
+            Plugin.Log.LogInfo($"[NativeMenu] Jump glow style {style}.");
         }
 
-        public static void CycleGlowColor()
+        /// <summary>
+        /// Whether the cover <paramref name="handler"/> shows has the full phone body, so it can take the
+        /// Lines and Keypad styles; null while that can't be told yet (the Hangeris mask isn't built).
+        /// </summary>
+        public static bool? TakesLines(SkinPrefabHandler handler)
         {
-            if (_glowColor == null) return;
-            _glowColor.Value = NextInPalette(s_glowPalette, Normalize(_glowColor.Value));
-            if (_glowEnabled != null) _glowEnabled.Value = true;
-            Plugin.Log.LogInfo($"[NativeMenu] Jump glow colour {_glowColor.Value}.");
+            if (_maskState != MaskState.Ready || handler == null || handler.IsLoading) return null;
+            if (!handler.TryGetInstance(out var instance) || instance == null) return null;
+            var renderers = instance.GetComponentsInChildren<Renderer>(true);
+            for (int i = 0; i < renderers.Count; i++)
+                if (renderers[i] != null && renderers[i].gameObject.name != GlowObjectName && IsCoverBody(renderers[i])) return true;
+            return false;
         }
 
-        /// <summary>Icon of the cover colour entry: the current colour, or white for the game's own.</summary>
-        public static Sprite CoverColorSwatch() => Swatch(TryParseHex(_coverTint?.Value, out _) ? Normalize(_coverTint.Value) : "FFFFFF");
+        /// <summary>Starts building the glow mask (from the menu, so TakesLines can answer).</summary>
+        public static void PrepareMask(SkinAddressableLibrary library) => EnsureMask(library);
 
-        public static Sprite GlowColorSwatch() => Swatch(TryParseHex(_glowColor?.Value, out _) ? Normalize(_glowColor.Value) : "FF0000");
-
-        private static Sprite Swatch(string hex)
+        public static string TargetName(ColorTarget target) => target switch
         {
-            if (_swatches.TryGetValue(hex, out var cached) && cached != null) return cached;
-            TryParseHex(hex, out var color);
-            const int size = 64;
+            ColorTarget.Cover => "Cover colour",
+            ColorTarget.Glow => "Jump glow colour",
+            ColorTarget.WizardTop => "Wizard top",
+            ColorTarget.WizardBottom => "Wizard bottom",
+            _ => "Wizard swirl",
+        };
+
+        /// <summary>Whether the colour replaces the game's own (the glow always has one).</summary>
+        public static bool IsColorSet(ColorTarget target) =>
+            target == ColorTarget.Glow ? GlowEnabled : TryParseColor(ColorEntry(target)?.Value, out _, out _);
+
+        /// <summary>The colour the picker opens on; white for an unset one.</summary>
+        public static void GetColor(ColorTarget target, out Color rgb, out float intensity)
+        {
+            if (TryParseColor(ColorEntry(target)?.Value, out rgb, out intensity)) return;
+            TryParseHex(target == ColorTarget.Glow ? DefaultGlowHex : "FFFFFF", out rgb);
+            intensity = 1f;
+        }
+
+        /// <summary>
+        /// Sets a colour. While the picker is being dragged <paramref name="save"/> is false: the value is
+        /// live in memory and CommitColors writes the file once on release.
+        /// </summary>
+        public static void SetColor(ColorTarget target, Color rgb, float intensity, bool save)
+        {
+            var entry = ColorEntry(target);
+            if (entry == null) return;
+            var file = entry.ConfigFile;
+            bool saveOnSet = file.SaveOnConfigSet;
+            file.SaveOnConfigSet = save;
+            try
+            {
+                entry.Value = FormatColor(rgb, intensity);
+                // Picking a glow colour means wanting the glow.
+                if (target == ColorTarget.Glow && _glowEnabled != null) _glowEnabled.Value = true;
+            }
+            finally
+            {
+                file.SaveOnConfigSet = saveOnSet;
+            }
+        }
+
+        public static void CommitColors()
+        {
+            _colors?[0]?.ConfigFile.Save();
+            Plugin.Log.LogInfo($"[NativeMenu] Colours: {string.Join(", ", Array.ConvertAll(_colors ?? Array.Empty<ConfigEntry<string>>(), e => e.Definition.Key + "=" + e.Value))}.");
+        }
+
+        /// <summary>Back to the game's colour (red for the glow, which has none).</summary>
+        public static void ResetColor(ColorTarget target)
+        {
+            var entry = ColorEntry(target);
+            if (entry != null) entry.Value = target == ColorTarget.Glow ? DefaultGlowHex : "";
+        }
+
+        /// <summary>Icon of a colour entry: a disc of the colour, or a struck-through one for the game's own.</summary>
+        public static Sprite ColorSwatch(ColorTarget target)
+        {
+            if (target != ColorTarget.Glow && !IsColorSet(target)) return Swatch(null);
+            GetColor(target, out var rgb, out _);
+            return Swatch(rgb);
+        }
+
+        private static ConfigEntry<string> ColorEntry(ColorTarget target) =>
+            _colors != null && (int)target < _colors.Length ? _colors[(int)target] : null;
+
+        private static Sprite Swatch(Color? color)
+        {
+            string key = color.HasValue ? ToHex(color.Value) : "none";
+            if (_swatches.TryGetValue(key, out var cached) && cached != null) return cached;
+
+            const int size = 96;
+            const float radius = 44f, ring = 5f;
+            var fill = color ?? new Color(0.22f, 0.22f, 0.24f, 1f);
+            var slash = new Color(0.9f, 0.2f, 0.2f, 1f);
+            var pixels = new Color32[size * size];
+            for (int y = 0; y < size; y++)
+            for (int x = 0; x < size; x++)
+            {
+                float dx = x + 0.5f - size / 2f, dy = y + 0.5f - size / 2f;
+                float d = Mathf.Sqrt(dx * dx + dy * dy);
+                // One pixel of antialiasing on each edge.
+                float alpha = Mathf.Clamp01(radius - d + 0.5f);
+                Color c = d > radius - ring ? Color.white : fill;
+                if (!color.HasValue && d <= radius - ring && Mathf.Abs(dx + dy) < 4f) c = slash;
+                c.a = alpha;
+                pixels[y * size + x] = c;
+            }
             var texture = new Texture2D(size, size, TextureFormat.RGBA32, false);
             texture.hideFlags = HideFlags.DontUnloadUnusedAsset;
-            var pixels = new Color32[size * size];
-            Color32 fill = color;
-            for (int i = 0; i < pixels.Length; i++) pixels[i] = fill;
             texture.SetPixels32(pixels);
             texture.Apply(false, true);
             var sprite = Sprite.Create(texture, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), 100f);
             sprite.hideFlags = HideFlags.DontUnloadUnusedAsset;
-            _swatches[hex] = sprite;
+            _swatches[key] = sprite;
             return sprite;
-        }
-
-        private static string NextInPalette(string[] palette, string current)
-        {
-            int index = Array.IndexOf(palette, current);
-            return palette[(index + 1) % palette.Length];
-        }
-
-        private static bool HasWizardColors()
-        {
-            if (_wizardColors == null) return false;
-            foreach (var entry in _wizardColors) if (TryParseHex(entry?.Value, out _)) return true;
-            return false;
         }
 
         // ── Looks ─────────────────────────────────────────────────────────────
@@ -237,10 +324,11 @@ namespace CharmReplacer
         public static Look LocalLook()
         {
             var look = new Look();
-            if (GlowEnabled && TryParseHex(_glowColor?.Value, out var glow)) look.Glow = glow;
-            if (TryParseHex(_coverTint?.Value, out var tint)) look.Tint = tint;
+            if (GlowEnabled) look.Glow = Effective(ColorEntry(ColorTarget.Glow)?.Value) ?? Effective(DefaultGlowHex);
+            look.Style = Style;
+            look.Tint = Effective(ColorEntry(ColorTarget.Cover)?.Value);
             for (int i = 0; i < look.Wizard.Length; i++)
-                if (_wizardColors != null && TryParseHex(_wizardColors[i]?.Value, out var c)) look.Wizard[i] = c;
+                look.Wizard[i] = Effective(ColorEntry(ColorTarget.WizardTop + i)?.Value);
             return look;
         }
 
@@ -250,36 +338,52 @@ namespace CharmReplacer
             foreach (var token in SkinOverride.RemoteFlagTokens(networked))
             {
                 if (token.StartsWith(GlowToken, StringComparison.Ordinal))
-                {
-                    if (TryParseHex(token.Substring(GlowToken.Length), out var glow)) look.Glow = glow;
-                }
+                    look.Glow = Effective(token.Substring(GlowToken.Length));
                 else if (token.StartsWith(TintToken, StringComparison.Ordinal))
+                    look.Tint = Effective(token.Substring(TintToken.Length));
+                else if (token.StartsWith(StyleToken, StringComparison.Ordinal))
                 {
-                    if (TryParseHex(token.Substring(TintToken.Length), out var tint)) look.Tint = tint;
+                    if (Enum.TryParse(token.Substring(StyleToken.Length), true, out JumpStyle style)) look.Style = style;
                 }
                 else if (token.StartsWith(WizardToken, StringComparison.Ordinal))
                 {
                     var parts = token.Substring(WizardToken.Length).Split('.');
                     for (int i = 0; i < look.Wizard.Length && i < parts.Length; i++)
-                        if (TryParseHex(parts[i], out var c)) look.Wizard[i] = c;
+                        look.Wizard[i] = Effective(parts[i]);
                 }
             }
             return look;
         }
 
-        /// <summary>Appended to the flag SkinOverride publishes, so other clients rebuild this look.</summary>
+        /// <summary>
+        /// Appended to the flag SkinOverride publishes, so other clients rebuild this look. Colours go as
+        /// the config writes them; a version without intensities reads plain "RRGGBB" values only.
+        /// </summary>
         public static string LocalFlagTokens()
         {
-            var look = LocalLook();
-            string tokens = look.Glow.HasValue ? ";" + GlowToken + ToHex(look.Glow.Value) : "";
-            if (look.Tint.HasValue) tokens += ";" + TintToken + ToHex(look.Tint.Value);
-            if (look.Wizard[0].HasValue || look.Wizard[1].HasValue || look.Wizard[2].HasValue)
+            string tokens = "";
+            if (GlowEnabled)
             {
-                tokens += ";" + WizardToken;
-                for (int i = 0; i < look.Wizard.Length; i++)
-                    tokens += (i > 0 ? "." : "") + (look.Wizard[i].HasValue ? ToHex(look.Wizard[i].Value) : "");
+                tokens += ";" + GlowToken + (ValidOrNull(ColorEntry(ColorTarget.Glow)?.Value) ?? DefaultGlowHex);
+                if (Style != JumpStyle.Lines) tokens += ";" + StyleToken + Style.ToString().ToLowerInvariant();
             }
+            string tint = ValidOrNull(ColorEntry(ColorTarget.Cover)?.Value);
+            if (tint != null) tokens += ";" + TintToken + tint;
+
+            var wizard = new string[3];
+            for (int i = 0; i < wizard.Length; i++) wizard[i] = ValidOrNull(ColorEntry(ColorTarget.WizardTop + i)?.Value);
+            if (wizard[0] != null || wizard[1] != null || wizard[2] != null)
+                tokens += ";" + WizardToken + string.Join(".", Array.ConvertAll(wizard, w => w ?? ""));
             return tokens;
+        }
+
+        private static string ValidOrNull(string value) => TryParseColor(value, out _, out _) ? Normalize(value) : null;
+
+        /// <summary>The colour a value stands for, intensity applied, or null for the game's own.</summary>
+        private static Color? Effective(string value)
+        {
+            if (!TryParseColor(value, out var rgb, out float intensity)) return null;
+            return new Color(rgb.r * intensity, rgb.g * intensity, rgb.b * intensity, 1f);
         }
 
         // ── Applying ──────────────────────────────────────────────────────────
@@ -306,47 +410,90 @@ namespace CharmReplacer
 
                 if (!look.Glow.HasValue)
                 {
-                    for (int i = 0; i < renderers.Count; i++)
-                    {
-                        if (renderers[i] == null) continue;
-                        RemoveOverlay(renderers[i].Pointer);
-                        RemoveOutlineGlows(renderers[i]);
-                    }
+                    ClearGlow(renderers, true, true);
                     _settled[handler.Pointer] = state;
                     return;
                 }
 
-                if (!EnsureMask(library)) return;
+                // Keypad on a cover with a light of its own (Hangeris) is that light, in the glow's colour
+                // (Recolor). Any other style turns such a light off (Recolor) and adds its own.
+                if (look.Style == JumpStyle.Keypad && HasNativeJumpLight(renderers))
+                {
+                    ClearGlow(renderers, true, true);
+                    LogGlowMode(handler.CurrentSkinKey, "its own light, recoloured");
+                    _settled[handler.Pointer] = state;
+                    return;
+                }
+
+                // Outline where it was asked for, and on covers without the full body; the side lines
+                // stand in for it on a full-body cover with no outline mesh.
                 bool placed = false;
-                for (int i = 0; i < renderers.Count; i++)
+                if (look.Style != JumpStyle.Outline)
                 {
-                    var cover = renderers[i];
-                    if (cover == null || cover.gameObject.name == GlowObjectName || !IsCoverBody(cover)) continue;
-                    EnsureOverlay(cover, look.Glow.Value, jump);
-                    placed = true;
+                    if (!EnsureMask(library)) return;
+                    placed = PlaceOverlays(renderers, look, jump);
+                    if (placed) LogGlowMode(handler.CurrentSkinKey, look.Style.ToString());
                 }
-                if (placed)
+                if (!placed)
                 {
-                    LogGlowMode(handler.CurrentSkinKey, "side lines");
-                    _settled[handler.Pointer] = state;
-                    return;
+                    placed = PlaceOutlines(renderers, look.Glow.Value, jump);
+                    if (placed) LogGlowMode(handler.CurrentSkinKey, "outline");
                 }
-
-                for (int i = 0; i < renderers.Count; i++)
+                if (!placed && look.Style == JumpStyle.Outline)
                 {
-                    var outline = renderers[i];
-                    var mesh = outline != null ? MeshOf(outline) : null;
-                    if (mesh == null || mesh.name.IndexOf("_Outline", StringComparison.Ordinal) < 0) continue;
-                    EnsureOutlineGlow(outline, look.Glow.Value, jump);
-                    placed = true;
+                    if (!EnsureMask(library)) return;
+                    placed = PlaceOverlays(renderers, look, jump);
+                    if (placed) LogGlowMode(handler.CurrentSkinKey, "side lines (it has no outline)");
                 }
-                if (placed) LogGlowMode(handler.CurrentSkinKey, "outline");
-                else LogMeshMiss(handler.CurrentSkinKey, renderers);
+                if (!placed) LogMeshMiss(handler.CurrentSkinKey, renderers);
                 _settled[handler.Pointer] = state;
             }
             catch (Exception ex)
             {
                 Plugin.Log.LogWarning($"[Skin] Cover extras error: {ex.Message}");
+            }
+        }
+
+        // The overlay of the look's style on every full-body renderer; false if the cover has none.
+        private static bool PlaceOverlays(Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppArrayBase<Renderer> renderers, Look look,
+            PlayerJumpEnabledShader jump)
+        {
+            var template = look.Style == JumpStyle.Keypad ? _keypadTemplate : _linesTemplate;
+            bool placed = false;
+            for (int i = 0; i < renderers.Count; i++)
+            {
+                var cover = renderers[i];
+                if (cover == null || cover.gameObject.name == GlowObjectName || !IsCoverBody(cover)) continue;
+                EnsureOverlay(cover, look.Glow.Value, jump, template);
+                placed = true;
+            }
+            if (placed) ClearGlow(renderers, false, true);
+            return placed;
+        }
+
+        private static bool PlaceOutlines(Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppArrayBase<Renderer> renderers, Color color,
+            PlayerJumpEnabledShader jump)
+        {
+            bool placed = false;
+            for (int i = 0; i < renderers.Count; i++)
+            {
+                var outline = renderers[i];
+                var mesh = outline != null ? MeshOf(outline) : null;
+                if (mesh == null || mesh.name.IndexOf("_Outline", StringComparison.Ordinal) < 0) continue;
+                EnsureOutlineGlow(outline, color, jump);
+                placed = true;
+            }
+            if (placed) ClearGlow(renderers, true, false);
+            return placed;
+        }
+
+        private static void ClearGlow(Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppArrayBase<Renderer> renderers, bool overlays, bool outlines)
+        {
+            for (int i = 0; i < renderers.Count; i++)
+            {
+                if (renderers[i] == null) continue;
+                if (overlays) RemoveOverlay(renderers[i].Pointer);
+                if (outlines) RemoveOutlineGlows(renderers[i]);
             }
         }
 
@@ -524,13 +671,17 @@ namespace CharmReplacer
             return filter != null ? filter.sharedMesh : null;
         }
 
-        private static void EnsureOverlay(Renderer cover, Color color, PlayerJumpEnabledShader jump)
+        private static void EnsureOverlay(Renderer cover, Color color, PlayerJumpEnabledShader jump, Material template)
         {
             if (_overlays.TryGetValue(cover.Pointer, out var existing) && existing.Root != null)
             {
-                existing.Jump = jump;
-                if (existing.Color != color) SetGlowColor(existing, color);
-                return;
+                if (existing.Template == template)
+                {
+                    existing.Jump = jump;
+                    if (existing.Color != color) SetGlowColor(existing, color);
+                    return;
+                }
+                RemoveOverlay(cover.Pointer);
             }
 
             var root = new GameObject(GlowObjectName);
@@ -553,13 +704,13 @@ namespace CharmReplacer
                 renderer = root.AddComponent<MeshRenderer>();
             }
 
-            var material = UnityEngine.Object.Instantiate(_glowTemplate);
+            var material = UnityEngine.Object.Instantiate(template);
             renderer.sharedMaterial = material;
             renderer.shadowCastingMode = ShadowCastingMode.Off;
             renderer.receiveShadows = false;
             renderer.enabled = false;
 
-            var overlay = new Overlay { Cover = cover, Root = root, Renderer = renderer, Material = material, Jump = jump };
+            var overlay = new Overlay { Cover = cover, Root = root, Renderer = renderer, Material = material, Jump = jump, Template = template };
             SetGlowColor(overlay, color);
             _overlays[cover.Pointer] = overlay;
         }
@@ -583,7 +734,7 @@ namespace CharmReplacer
 
         private static void LogGlowMode(string key, string mode)
         {
-            if (!string.IsNullOrEmpty(key) && _loggedGlowModes.Add(key))
+            if (!string.IsNullOrEmpty(key) && _loggedGlowModes.Add(key + "|" + mode))
                 Plugin.Log.LogInfo($"[Skin] ✓ Jump glow on '{key}': {mode}.");
         }
 
@@ -601,14 +752,36 @@ namespace CharmReplacer
 
         // ── Cover colour ──────────────────────────────────────────────────────
 
+        private static bool HasNativeJumpLight(Material m) =>
+            m != null && m.HasProperty(ColorJumpId) && m.HasProperty(EmissiveTexId) && m.GetTexture(EmissiveTexId) != null
+            && (m.IsKeywordEnabled(JumpLightKeyword) || m.HasProperty(JumpLightId) && m.GetFloat(JumpLightId) > 0.5f);
+
+        private static bool HasNativeJumpLight(Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppArrayBase<Renderer> renderers)
+        {
+            for (int i = 0; i < renderers.Count; i++)
+            {
+                var renderer = renderers[i];
+                if (renderer == null || renderer.gameObject.name == GlowObjectName) continue;
+                var materials = renderer.sharedMaterials;
+                if (materials == null) continue;
+                for (int slot = 0; slot < materials.Length; slot++)
+                    if (HasNativeJumpLight(materials[slot])) return true;
+            }
+            return false;
+        }
+
         /// <summary>
         /// Wizard: its three colours (the swirl keeps moving, only the palette changes). Any other cover
-        /// on SG_Player_MSAO: _Tint. Each recoloured slot gets its own material clone, restored when the
-        /// look goes back to the game's colours.
+        /// on SG_Player_MSAO: _Tint. A cover's own jump light: the glow colour for the Keypad style, black
+        /// for the others (they bring their own). Each changed slot gets its own material clone, restored when the look goes back
+        /// to the game's.
         /// </summary>
         private static void Recolor(Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppArrayBase<Renderer> renderers, Look look, bool isWizard)
         {
             bool wizard = isWizard && (look.Wizard[0].HasValue || look.Wizard[1].HasValue || look.Wizard[2].HasValue);
+            Color? jump = !look.Glow.HasValue ? null
+                : look.Style != JumpStyle.Keypad ? Color.black
+                : new Color(look.Glow.Value.r * GlowIntensity, look.Glow.Value.g * GlowIntensity, look.Glow.Value.b * GlowIntensity, 1f);
             for (int i = 0; i < renderers.Count; i++)
             {
                 var renderer = renderers[i];
@@ -633,8 +806,9 @@ namespace CharmReplacer
                     bool isWizardMaterial = original.shader.name == WizardShader;
                     bool wantWizard = wizard && isWizardMaterial;
                     bool wantTint = !isWizardMaterial && look.Tint.HasValue && original.HasProperty(TintId) && !IsCustomPainted(original);
+                    bool wantJump = jump.HasValue && HasNativeJumpLight(original);
 
-                    if (!wantWizard && !wantTint)
+                    if (!wantWizard && !wantTint && !wantJump)
                     {
                         if (tracked == null) continue;
                         materials[slot] = tracked.Original;
@@ -656,22 +830,26 @@ namespace CharmReplacer
                         renderer.sharedMaterials = materials;
                     }
 
-                    if (wantWizard)
+                    // The clone outlives look changes, so every property it could hold is rewritten, back to
+                    // the original's value when no longer wanted.
+                    if (isWizardMaterial)
                     {
                         for (int c = 0; c < WizardColorIds.Length; c++)
                         {
                             // The game's alpha is kept: the shader authors it per colour (0 for top/bottom).
                             var source = original.GetColor(WizardColorIds[c]);
-                            var target = look.Wizard[c].HasValue ? look.Wizard[c].Value : source;
+                            var target = wantWizard && look.Wizard[c].HasValue ? look.Wizard[c].Value : source;
                             tracked.Clone.SetColor(WizardColorIds[c], new Color(target.r, target.g, target.b, source.a));
                         }
                     }
-                    else
+                    else if (original.HasProperty(TintId))
                     {
                         var source = original.GetColor(TintId);
-                        var t = look.Tint.Value;
+                        var t = wantTint ? look.Tint.Value : Color.white;
                         tracked.Clone.SetColor(TintId, new Color(source.r * t.r, source.g * t.g, source.b * t.b, source.a));
                     }
+                    if (original.HasProperty(ColorJumpId))
+                        tracked.Clone.SetColor(ColorJumpId, wantJump ? jump.Value : original.GetColor(ColorJumpId));
                 }
             }
         }
@@ -753,26 +931,33 @@ namespace CharmReplacer
             }
             if (source == null) throw new InvalidOperationException("no jump-lit material on the Hangeris cover");
 
-            var mask = BuildMask(source.GetTexture(EmissiveTexId));
-            _glowTemplate = UnityEngine.Object.Instantiate(source);
-            _glowTemplate.name = "CharmReplacer_JumpGlow";
-            _glowTemplate.hideFlags = HideFlags.DontUnloadUnusedAsset;
-            // Lines only: black base so just the emission shows, everything off the mask clipped away.
-            _glowTemplate.SetTexture(MainTexId, mask);
-            _glowTemplate.SetTexture(EmissiveTexId, mask);
-            _glowTemplate.SetColor(TintId, Color.black);
-            _glowTemplate.SetFloat(AlphaClipFloatId, 0.5f);
-            // The Hangeris normal/MSAO maps go away with its bundle.
-            _glowTemplate.SetTexture(NormalTexId, null);
-            _glowTemplate.SetTexture(MsaoTexId, null);
-            _glowTemplate.SetFloat(MetallicId, 0f);
-            _glowTemplate.SetFloat(SmoothnessId, 0f);
-            _glowTemplate.SetFloat(FresnelOnId, 0f);
-            _glowTemplate.renderQueue = GlowRenderQueue;
+            BuildMasks(source.GetTexture(EmissiveTexId), out var lines, out var keypad);
+            _linesTemplate = MakeGlowTemplate(source, lines, "CharmReplacer_JumpGlowLines");
+            _keypadTemplate = MakeGlowTemplate(source, keypad, "CharmReplacer_JumpGlowKeypad");
 
             ReleaseLoad();
             _maskState = MaskState.Ready;
             Plugin.Log.LogInfo($"[Skin] ✓ Jump glow ready (body mesh '{_bodyMeshName}', {_bodyVertexCount} verts).");
+        }
+
+        private static Material MakeGlowTemplate(Material source, Texture2D mask, string name)
+        {
+            var template = UnityEngine.Object.Instantiate(source);
+            template.name = name;
+            template.hideFlags = HideFlags.DontUnloadUnusedAsset;
+            // Lines only: black base so just the emission shows, everything off the mask clipped away.
+            template.SetTexture(MainTexId, mask);
+            template.SetTexture(EmissiveTexId, mask);
+            template.SetColor(TintId, Color.black);
+            template.SetFloat(AlphaClipFloatId, 0.5f);
+            // The Hangeris normal/MSAO maps go away with its bundle.
+            template.SetTexture(NormalTexId, null);
+            template.SetTexture(MsaoTexId, null);
+            template.SetFloat(MetallicId, 0f);
+            template.SetFloat(SmoothnessId, 0f);
+            template.SetFloat(FresnelOnId, 0f);
+            template.renderQueue = GlowRenderQueue;
+            return template;
         }
 
         private static void ReleaseLoad()
@@ -782,28 +967,36 @@ namespace CharmReplacer
         }
 
         /// <summary>
-        /// The jump-lit part of the Hangeris emission map (its alpha) without the phone's keys. The texture is
-        /// GPU-only, so it is read back through a RenderTexture.
+        /// The jump-lit part of the Hangeris emission map (its alpha): without the phone's keys for Lines,
+        /// whole for Keypad. The texture is GPU-only, so it is read back through a RenderTexture.
         /// </summary>
-        private static Texture2D BuildMask(Texture source)
+        private static void BuildMasks(Texture source, out Texture2D lines, out Texture2D keypad)
         {
             int w = source.width, h = source.height;
             var pixels = SkinLoader.ReadPixels(source);
 
-            var keep = StripKeys(pixels, w, h, out int keys, out int lines);
-            var maskPixels = new Color32[w * h];
-            for (int i = 0; i < maskPixels.Length; i++)
+            var keep = StripKeys(pixels, w, h, out int keys, out int pieces);
+            var linePixels = new Color32[w * h];
+            var keypadPixels = new Color32[w * h];
+            for (int i = 0; i < linePixels.Length; i++)
             {
-                byte v = keep[i] ? pixels[i].a : (byte)0;
-                maskPixels[i] = new Color32(v, v, v, v);
+                byte a = pixels[i].a;
+                byte v = keep[i] ? a : (byte)0;
+                linePixels[i] = new Color32(v, v, v, v);
+                keypadPixels[i] = new Color32(a, a, a, a);
             }
-            Plugin.Log.LogInfo($"[Skin] Jump glow mask {w}x{h}: removed {keys} key(s), kept {lines} line piece(s).");
-            DumpMask(pixels, maskPixels, w, h);
+            Plugin.Log.LogInfo($"[Skin] Jump glow mask {w}x{h}: removed {keys} key(s), kept {pieces} line piece(s).");
+            DumpMask(pixels, linePixels, w, h);
+            lines = MaskTexture(linePixels, w, h, "CharmReplacer_JumpGlowMask");
+            keypad = MaskTexture(keypadPixels, w, h, "CharmReplacer_JumpGlowKeypadMask");
+        }
 
+        private static Texture2D MaskTexture(Color32[] pixels, int w, int h, string name)
+        {
             var mask = new Texture2D(w, h, TextureFormat.RGBA32, true);
-            mask.name = "CharmReplacer_JumpGlowMask";
+            mask.name = name;
             mask.hideFlags = HideFlags.DontUnloadUnusedAsset;
-            mask.SetPixels32(maskPixels);
+            mask.SetPixels32(pixels);
             mask.Apply(true, true);
             return mask;
         }
@@ -944,6 +1137,27 @@ namespace CharmReplacer
         // ── Colours ───────────────────────────────────────────────────────────
 
         private static string Normalize(string hex) => (hex ?? "").Trim().TrimStart('#').ToUpperInvariant();
+
+        /// <summary>"RRGGBB" (intensity 100 %) or "RRGGBB:NNN".</summary>
+        private static bool TryParseColor(string text, out Color rgb, out float intensity)
+        {
+            intensity = 1f;
+            text = Normalize(text);
+            int colon = text.IndexOf(':');
+            if (colon >= 0)
+            {
+                if (!int.TryParse(text.Substring(colon + 1), out int percent)) { rgb = default; return false; }
+                intensity = Mathf.Clamp(percent, 0, MaxIntensityPercent) / 100f;
+                text = text.Substring(0, colon);
+            }
+            return TryParseHex(text, out rgb);
+        }
+
+        private static string FormatColor(Color rgb, float intensity)
+        {
+            int percent = Mathf.Clamp(Mathf.RoundToInt(intensity * 100f), 0, MaxIntensityPercent);
+            return percent == 100 ? ToHex(rgb) : $"{ToHex(rgb)}:{percent}";
+        }
 
         private static bool TryParseHex(string text, out Color color)
         {

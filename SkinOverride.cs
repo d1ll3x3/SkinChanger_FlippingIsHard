@@ -30,8 +30,11 @@ namespace CharmReplacer
         // ApplyAsync is async; give a base reload this long to land before asking again.
         private const float EnsureBaseCooldown = 2f;
 
+        private const string ModelToken = "model=";
+
         private static ConfigEntry<bool> _coverEnabled;
         private static ConfigEntry<bool> _charmEnabled;
+        private static ConfigEntry<string> _coverModel;
 
         private static float _nextTick;
         private static float _nextRescan;
@@ -48,10 +51,22 @@ namespace CharmReplacer
 
         private static readonly SkinCategory[] s_categories = { SkinCategory.Cover, SkinCategory.Charm };
 
-        public static void Init(ConfigEntry<bool> coverEnabled, ConfigEntry<bool> charmEnabled)
+        public static void Init(ConfigEntry<bool> coverEnabled, ConfigEntry<bool> charmEnabled, ConfigEntry<string> coverModel)
         {
             _coverEnabled = coverEnabled;
             _charmEnabled = charmEnabled;
+            _coverModel = coverModel;
+        }
+
+        /// <summary>Cover the custom skin is painted on; "" is the game's default cover.</summary>
+        public static string CoverModel => _coverModel?.Value?.Trim() ?? "";
+
+        public static void SetCoverModel(string key)
+        {
+            if (_coverModel == null) return;
+            _coverModel.Value = key ?? "";
+            Plugin.Log.LogInfo($"[NativeMenu] Custom cover model '{(CoverModel.Length == 0 ? "default" : CoverModel)}'.");
+            RequestRefresh();
         }
 
         public static bool HasLocalAsset(SkinCategory category) => category switch
@@ -167,15 +182,51 @@ namespace CharmReplacer
         // ── Base skin ─────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Key loaded instead of the synced one. "" makes PlayerSkins fall back to the handler's default
-        /// (M_Skin_Cover_Default for the cover). The custom charm replaces the phone charm mesh
-        /// (CharmSystem.IsCharmTarget), so the Phone charm is used when the skin library has one.
+        /// Key the local player loads instead of the synced one. For the cover, the model picked in the Mod
+        /// tab, or "" so PlayerSkins falls back to the handler's default (M_Skin_Cover_Default). The custom
+        /// charm replaces the phone charm mesh (CharmSystem.IsCharmTarget), so the Phone charm is used when
+        /// the skin library has one.
         /// </summary>
         internal static string BaseKey(SkinCategory category, SkinsManager manager)
         {
+            if (category == SkinCategory.Cover) return CanUseCoverModel(CoverModel, manager) ? ValidCoverKey(CoverModel, manager) : "";
             if (category != SkinCategory.Charm) return "";
             if (!_charmBaseResolved) ResolveCharmBaseKey(manager);
             return _charmBaseResolved ? _charmBaseKey ?? "" : FallbackCharmBaseKey;
+        }
+
+        /// <summary>BaseKey for any player: a remote player's cover model comes from their flag.</summary>
+        internal static string BaseKeyFor(PlayerNetworked networked, SkinCategory category, SkinsManager manager)
+        {
+            if (category != SkinCategory.Cover || networked == null || networked.IsOwner) return BaseKey(category, manager);
+            foreach (var token in RemoteFlagTokens(networked))
+                if (token.StartsWith(ModelToken, StringComparison.Ordinal))
+                    return ValidCoverKey(token.Substring(ModelToken.Length), manager);
+            return "";
+        }
+
+        /// <summary>
+        /// Whether the local player can put the custom skin on that cover: owned (DLC) or unlocked, as the
+        /// game decides for its own menu, and with a texture to paint (not the Wizard, nor a cover that
+        /// already turned out to have none).
+        /// </summary>
+        internal static bool CanUseCoverModel(string key, SkinsManager manager)
+        {
+            if (string.IsNullOrEmpty(key)) return true;
+            if (CoverExtras.IsWizard(key) || SkinSystem.IsUnpaintableModel(key)) return false;
+            return manager == null || manager.IsSkinUnlocked(key);
+        }
+
+        // A key the library has no cover for would never show as loaded, and the base would be reloaded
+        // every cooldown. The main menu has no manager to ask; its library loads what it is given.
+        private static string ValidCoverKey(string key, SkinsManager manager)
+        {
+            if (string.IsNullOrEmpty(key)) return "";
+            var refs = manager?.skinAddressableLibrary?.allLoadedSkinRefs;
+            if (refs == null || refs.Count == 0) return key;
+            for (int i = 0; i < refs.Count; i++)
+                if (refs[i] != null && refs[i].SkinCategory == SkinCategory.Cover && refs[i].AddressableKey == key) return key;
+            return "";
         }
 
         private static void ResolveCharmBaseKey(SkinsManager manager)
@@ -229,7 +280,7 @@ namespace CharmReplacer
 
             if ((category == SkinCategory.Cover || category == SkinCategory.Charm)
                 && ShouldForceBase(skins?.playerRef?.playerNetworked, category))
-                skinUISOKey = BaseKey(category, skins.skinsManager);
+                skinUISOKey = BaseKeyFor(skins.playerRef.playerNetworked, category, skins.skinsManager);
             return true;
         }
 
@@ -275,6 +326,7 @@ namespace CharmReplacer
         private static string BuildLocalFlag()
         {
             string extra = CapFlip.LocalFlagToken() + CoverExtras.LocalFlagTokens();
+            if (IsLocalActive(SkinCategory.Cover) && CoverModel.Length > 0) extra += ";" + ModelToken + CoverModel;
             if (!HasLocalAsset(SkinCategory.Cover) && !HasLocalAsset(SkinCategory.Charm) && extra.Length == 0) return "";
             return FlagPrefix
                 + "cover=" + (IsLocalActive(SkinCategory.Cover) ? 1 : 0)
@@ -311,8 +363,13 @@ namespace CharmReplacer
             _lastVisible[key] = visible;
 
             if (!ShouldForceBase(networked, category) || handler.IsLoading) return;
-            string baseKey = BaseKey(category, skins.skinsManager);
-            if (IsShowingBase(handler, baseKey) || !EnsureCooldownElapsed(handler)) return;
+            string baseKey = BaseKeyFor(networked, category, skins.skinsManager);
+            if (IsShowingBase(handler, baseKey))
+            {
+                if (category == SkinCategory.Cover && baseKey.Length > 0) SkinSystem.RegisterCoverModel(handler);
+                return;
+            }
+            if (!EnsureCooldownElapsed(handler)) return;
 
             Plugin.Log.LogDebug($"[NativeMenu] Loading base {category} for '{PlayerIdentity.GetPlayerNickname(networked.gameObject)}'.");
             skins.ApplySkinFromNetwork(category, baseKey);

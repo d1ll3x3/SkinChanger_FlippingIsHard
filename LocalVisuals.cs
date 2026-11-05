@@ -212,6 +212,7 @@ namespace CharmReplacer
             }
 
             if (!handler.TryGetInstance(out var instance) || instance == null) return;
+            if (category == SkinCategory.Cover && baseKey.Length > 0) SkinSystem.RegisterCoverModel(handler);
             if (category == SkinCategory.Cover)
                 SkinSystem.PaintPhoneCovers(instance.gameObject, CharmState.CustomSkinTexture, CharmState.CustomSkinEmissionTexture);
             else

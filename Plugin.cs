@@ -10,7 +10,7 @@ using System.Collections.Generic;
 
 namespace CharmReplacer;
 
-[BepInPlugin("com.dani.charmreplacer", "CharmReplacer", "1.7.0")]
+[BepInPlugin("com.dani.charmreplacer", "CharmReplacer", "1.8.0")]
 public class Plugin : BasePlugin
 {
     internal static new ManualLogSource Log;
@@ -36,25 +36,28 @@ public class Plugin : BasePlugin
             "Show your custom skin (Skin.png) to yourself and to players with the mod. Players without the mod see the cover selected in the game's menu.");
         var customCharm = Config.Bind("NativeMenu", "CustomCharmEnabled", true,
             "Show your custom charm (hatbundle) to yourself and to players with the mod. Players without the mod see the charm selected in the game's menu.");
-        SkinOverride.Init(customCover, customCharm);
+        var coverModel = Config.Bind("NativeMenu", "CustomCoverModel", "",
+            "Addressable key of the cover your custom skin is painted on (empty = the default cover). Picked from the Model entry in the Mod tab; the skin follows that cover's UV layout.");
+        SkinOverride.Init(customCover, customCharm, coverModel);
         var customFace = Config.Bind("NativeMenu", "CustomFaceEnabled", true,
             "Show Face.png on your phone's screen, to yourself only (it stays still: no blinking or talking).");
         CustomFace.Init(customFace);
 
-        // --- Config: cover extras (CoverExtras) ---
+        // --- Config: cover extras (CoverExtras), set from the Mod tab ---
+        // Colours are hex RGB, optionally with an intensity in percent: "FF0000" or "FF0000:150" (0-200).
         var jumpGlow = Config.Bind("NativeMenu", "JumpGlowEnabled", false,
-            "Light up the cover's side lines while the jump is available, on any cover. Toggled from the Jump Glow entry in the Cover tab; players with the mod see it too.");
-        var jumpGlowColor = Config.Bind("CoverExtras", "JumpGlowColor", "FF0000",
-            "Hex RGB colour of the jump glow (e.g. FF0000 for red). Cycled from the Glow Colour entry in the Cover tab.");
-        var coverTint = Config.Bind("CoverExtras", "CoverTint", "",
-            "Hex RGB tint for your cover (empty = the game's colours). Cycled from the Cover Colour entry in the Cover tab, which also sets the Wizard colours below.");
-        var wizardColors = new[]
+            "Light up the cover's side lines while the jump is available, on any cover. Players with the mod see it too.");
+        var jumpStyle = Config.Bind("CoverExtras", "JumpGlowStyle", CoverExtras.JumpStyle.Lines,
+            "Jump glow look: Lines (the Hangeris side lines without the keypad), Keypad (the Hangeris light whole) or Outline (the phone's outline, as on the Wizard). Covers without the full phone body always use Outline.");
+        var colors = new[]
         {
-            Config.Bind("CoverExtras", "WizardColorTop", "", "Hex RGB for the top colour of the Wizard cover. Empty keeps the game's colour."),
-            Config.Bind("CoverExtras", "WizardColorBottom", "", "Hex RGB for the bottom colour of the Wizard cover. Empty keeps the game's colour."),
-            Config.Bind("CoverExtras", "WizardColorSwirl", "", "Hex RGB for the moving swirls of the Wizard cover. Empty keeps the game's colour."),
+            Config.Bind("CoverExtras", "CoverTint", "", "Tint for your cover, e.g. FF8000 or FF8000:150. Empty = the game's colours."),
+            Config.Bind("CoverExtras", "JumpGlowColor", "FF0000", "Colour of the jump glow, e.g. FF0000 or FF0000:150."),
+            Config.Bind("CoverExtras", "WizardColorTop", "", "Top colour of the Wizard cover. Empty keeps the game's colour."),
+            Config.Bind("CoverExtras", "WizardColorBottom", "", "Bottom colour of the Wizard cover. Empty keeps the game's colour."),
+            Config.Bind("CoverExtras", "WizardColorSwirl", "", "Colour of the Wizard cover's moving swirls. Empty keeps the game's colour."),
         };
-        CoverExtras.Init(jumpGlow, jumpGlowColor, coverTint, wizardColors);
+        CoverExtras.Init(jumpGlow, jumpStyle, colors);
 
         ClassInjector.RegisterTypeInIl2Cpp<CharmReplacerBehavior>();
         AddComponent<CharmReplacerBehavior>();

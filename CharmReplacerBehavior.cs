@@ -94,6 +94,7 @@ namespace CharmReplacer
                 SkinOverride.Tick();
                 LocalVisuals.Tick();
                 IconStudio.Tick();
+                ModPanel.Tick();
 
                 if (!HasCharmSource && !HasSkinSource) return;
 

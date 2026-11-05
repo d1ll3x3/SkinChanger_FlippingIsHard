@@ -5,13 +5,17 @@
 - **Full game support**: v1.5+ targets the Steam release of *Flipping is Hard* (the v1.7 skin rework,
   where covers and charms are one system). For the demo and playtests, use v1.4.x.
 - **Mod tab in the game's menu**: the customization screen gets a **Mod** tab with every option of the
-  mod. **Custom** Cover/Charm switch your custom cover or charm on or off; the preview and the
-  main-menu phone show it too.
-- **Cover colour**: a colour entry in the Mod tab steps through a palette on each click. It tints any
-  cover and gives the Wizard cover a matching colour theme (its swirls keep moving).
-- **Jump glow**: the **Jump** entry lights up your cover's side lines while your jump is available, on
-  any cover, in the colour picked with the glow colour entry (red by default).
-- Your cover colour and jump glow are shown to other players with the mod.
+  mod, each entry captioned. **Skin** / **Charm** / **Face** switch your custom assets on or off; the
+  preview and the main-menu phone show them too. Entries only show where they apply (the Wizard's
+  colours with the Wizard equipped, the glow's options with the glow on...).
+- **Cover model**: the **Model** entry picks which cover your custom skin is painted on, among the
+  covers you own or have unlocked (the skin follows that cover's UV layout).
+- **Colour picker**: every colour (cover tint, jump glow, the Wizard's top, bottom and swirl) is set with
+  a hue/saturation picker and an intensity bar, live on the preview.
+- **Jump glow**: the **Jump** entry lights up your cover while your jump is available, on any cover.
+  **Jump style** picks the light: **Lines** (the Hangeris side lines without the keypad), **Keypad**
+  (the Hangeris light whole) or **Outline** (the phone's outline, as on the Wizard).
+- Your cover model, colours and jump glow are shown to other players with the mod.
 - **Custom face**: put a `Face.png` in the mod folder to show it on your phone's screen with its own
   colours (a still image, visible to you only). Template and example in `Tuto_Templates/Face/`.
 - **Multiplayer Skins & Charms**: Your friends can see your custom skin and you can see theirs! Just place each other's files in the mod folder!
